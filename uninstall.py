@@ -1,23 +1,24 @@
 """Platform uninstaller orchestrator.
 
 Tears down both extensions-service ECS infra and launcher backend/core infra
-by delegating to each repo's own teardown command.
+by delegating to each repo's own teardown command (same flags unified here).
 
-Reads platform-installer/state/<extension>/platform_resources.json to derive
+Reads bootstrap/state/<extension>/platform_resources.json to derive
 the AWS region used during provisioning.
 
 Usage:
-    python platform-installer/uninstall.py <extension> \\
-        --admin-profile acd-arbitium-tt-dev \\
+    python bootstrap/uninstall.py <extension> \\
+        --profile acd-arbitium-tt-dev \\
         [--yes] \\
         [--skip-extensions] \\
         [--skip-launcher] \\
         [--skip-tables] \\
-        [--skip-cognito]
+        [--skip-cognito] \\
+        [--keep-logs]
 
 Teardown order:
-  1. extensions-service: python run.py <ext> provision-infra teardown --profile ... --yes
-  2. launcher:           python scripts/teardown_environment.py <ext> --aws-profile ... --yes
+  1. extensions-service: python run.py <ext> provision-infra teardown --profile ... --yes [--keep-logs]
+  2. launcher:           python scripts/teardown_environment.py <ext> --aws-profile ... --yes [--skip-*] [--keep-logs]
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 _PLATFORM_INSTALLER_ROOT = Path(__file__).resolve().parent
@@ -36,6 +38,7 @@ sys.path.insert(0, str(_PLATFORM_INSTALLER_ROOT))
 # Venv resolution — mirrors install.py logic
 # ---------------------------------------------------------------------------
 
+
 def _resolve_python(repo_label: str, venv_dir: Path) -> str:
     candidates = [
         venv_dir / "bin" / "python",
@@ -46,7 +49,7 @@ def _resolve_python(repo_label: str, venv_dir: Path) -> str:
             return str(candidate)
     print(f"\nERROR: venv not found for {repo_label}.")
     print(f"  Expected: {venv_dir}")
-    print(f"\n  Run: bash platform-installer/setup-venvs.sh")
+    print(f"\n  Run: bash bootstrap/setup-venvs.sh")
     sys.exit(1)
 
 
@@ -90,17 +93,31 @@ def _resolve_region(platform_resources: dict, fallback: str) -> str:
     return str(platform_resources.get("aws_region") or fallback)
 
 
-def _run_extensions_teardown(extension: str, admin_profile: str) -> int:
+@dataclass(frozen=True)
+class UnifiedTeardownOptions:
+    """Flags passed through to underlying teardown CLIs (single source in uninstall)."""
+
+    keep_logs: bool = False
+    skip_tables: bool = False
+    skip_cognito: bool = False
+
+
+def _run_extensions_teardown(extension: str, profile: str, opts: UnifiedTeardownOptions) -> int:
     ext_service = _WORKSPACE_ROOT / "extensions-service"
+    cmd: list[str] = [
+        _extensions_python(),
+        "run.py",
+        extension,
+        "provision-infra",
+        "teardown",
+        "--profile",
+        profile,
+        "--yes",
+    ]
+    if opts.keep_logs:
+        cmd.append("--keep-logs")
     return _run_subprocess(
-        [
-            _extensions_python(),
-            "run.py",
-            extension,
-            "provision-infra", "teardown",
-            "--profile", admin_profile,
-            "--yes",
-        ],
+        cmd,
         cwd=ext_service,
         description=f"Extensions-service: teardown '{extension}'",
     )
@@ -108,24 +125,27 @@ def _run_extensions_teardown(extension: str, admin_profile: str) -> int:
 
 def _run_launcher_teardown(
     extension: str,
-    admin_profile: str,
+    profile: str,
     aws_region: str,
-    skip_tables: bool,
-    skip_cognito: bool,
+    opts: UnifiedTeardownOptions,
 ) -> int:
     launcher_scripts = _WORKSPACE_ROOT / "launcher" / "scripts"
-    cmd = [
+    cmd: list[str] = [
         _launcher_python(),
         "teardown_environment.py",
         extension,
-        "--aws-profile", admin_profile,
-        "--aws-region", aws_region,
+        "--aws-profile",
+        profile,
+        "--aws-region",
+        aws_region,
         "--yes",
     ]
-    if skip_tables:
+    if opts.skip_tables:
         cmd.append("--skip-tables")
-    if skip_cognito:
+    if opts.skip_cognito:
         cmd.append("--skip-cognito")
+    if opts.keep_logs:
+        cmd.append("--keep-logs")
     return _run_subprocess(
         cmd,
         cwd=launcher_scripts,
@@ -134,8 +154,9 @@ def _run_launcher_teardown(
 
 
 def _cleanup_platform_state(extension: str) -> None:
-    """Remove the platform-installer state dir for the extension."""
+    """Remove the bootstrap/platform state dir for the extension."""
     import shutil
+
     state_dir = _PLATFORM_INSTALLER_ROOT / "state" / extension
     if state_dir.exists():
         try:
@@ -155,9 +176,9 @@ def main() -> None:
         help="Extension / environment name to tear down (e.g. arbitiumrs)",
     )
     parser.add_argument(
-        "--admin-profile",
+        "--profile",
         required=True,
-        help="AWS named profile with admin rights",
+        help="AWS named profile (passed as --profile to extensions-service, --aws-profile to launcher)",
     )
     parser.add_argument(
         "--aws-region",
@@ -182,25 +203,38 @@ def main() -> None:
     parser.add_argument(
         "--skip-tables",
         action="store_true",
-        help="Preserve DynamoDB tables during launcher teardown",
+        help="Preserve DynamoDB tables (launcher teardown only)",
     )
     parser.add_argument(
         "--skip-cognito",
         action="store_true",
-        help="Preserve Cognito user pool during launcher teardown",
+        help="Preserve Cognito user pool (launcher teardown only)",
+    )
+    parser.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Preserve CloudWatch log groups in both extensions-service and launcher teardowns",
     )
     args = parser.parse_args()
 
     platform_resources = _read_platform_resources(args.extension)
     aws_region = _resolve_region(platform_resources, args.aws_region)
 
+    opts = UnifiedTeardownOptions(
+        keep_logs=args.keep_logs,
+        skip_tables=args.skip_tables,
+        skip_cognito=args.skip_cognito,
+    )
+
     print(f"\nPlatform uninstaller — extension: {args.extension}")
-    print(f"  AWS profile : {args.admin_profile}")
+    print(f"  AWS profile : {args.profile}")
     print(f"  AWS region  : {aws_region}")
     if args.skip_tables:
-        print("  DynamoDB tables : preserved (--skip-tables)")
+        print("  DynamoDB tables : preserved (--skip-tables, launcher)")
     if args.skip_cognito:
-        print("  Cognito pool    : preserved (--skip-cognito)")
+        print("  Cognito pool    : preserved (--skip-cognito, launcher)")
+    if args.keep_logs:
+        print("  CloudWatch logs : preserved (--keep-logs, both teardowns)")
 
     if not args.yes:
         print(f"\nThis will DELETE all provisioned AWS resources for '{args.extension}'.")
@@ -215,7 +249,8 @@ def main() -> None:
     if not args.skip_extensions:
         rc = _run_extensions_teardown(
             extension=args.extension,
-            admin_profile=args.admin_profile,
+            profile=args.profile,
+            opts=opts,
         )
         if rc != 0:
             errors.append(f"extensions-service teardown exited with code {rc}")
@@ -227,10 +262,9 @@ def main() -> None:
     if not args.skip_launcher:
         rc = _run_launcher_teardown(
             extension=args.extension,
-            admin_profile=args.admin_profile,
+            profile=args.profile,
             aws_region=aws_region,
-            skip_tables=args.skip_tables,
-            skip_cognito=args.skip_cognito,
+            opts=opts,
         )
         if rc != 0:
             errors.append(f"launcher teardown exited with code {rc}")

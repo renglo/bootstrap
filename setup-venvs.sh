@@ -5,13 +5,12 @@
 # This script creates/updates both from the workspace root.
 #
 # Usage (run from infra-installer/ workspace root):
-#   bash platform-installer/setup-venvs.sh
-#   bash platform-installer/setup-venvs.sh --python python3.12
-#   bash platform-installer/setup-venvs.sh --launcher-only
-#   bash platform-installer/setup-venvs.sh --extensions-only
+#   bash bootstrap/setup-venvs.sh
+#   bash bootstrap/setup-venvs.sh --launcher-only
+#   bash bootstrap/setup-venvs.sh --extensions-only
 #
-# After running this script, platform-installer/install.py will automatically
-# detect the correct venv for each repo.
+# Default Python is 3.12 (python3.12). Idempotent: safe to re-run.
+# After running, bootstrap/install.py auto-detects each repo's venv.
 
 set -euo pipefail
 
@@ -21,7 +20,7 @@ WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCHER_DIR="$WORKSPACE_ROOT/launcher"
 EXTENSIONS_DIR="$WORKSPACE_ROOT/extensions-service"
 
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-python3.12}"
 SETUP_LAUNCHER=true
 SETUP_EXTENSIONS=true
 
@@ -35,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     --launcher-only)  SETUP_EXTENSIONS=false; shift ;;
     --extensions-only) SETUP_LAUNCHER=false; shift ;;
     -h|--help)
-      echo "Usage: bash platform-installer/setup-venvs.sh [--python python3.12] [--launcher-only] [--extensions-only]"
+      echo "Usage: bash bootstrap/setup-venvs.sh [--python <exe>] [--launcher-only] [--extensions-only]"
       exit 0
       ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -111,4 +110,4 @@ if $SETUP_LAUNCHER;   then echo "  launcher           : $LAUNCHER_DIR/launch-ven
 if $SETUP_EXTENSIONS; then echo "  extensions-service : $EXTENSIONS_DIR/venv"; fi
 echo ""
 echo "You can now run:"
-echo "  python platform-installer/install.py <extension> --admin-profile <profile> --github-repo Org/repo"
+echo "  python bootstrap/install.py <extension> --profile <profile> --github-repo Org/repo"

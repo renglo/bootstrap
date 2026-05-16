@@ -1,27 +1,32 @@
 """Platform installer orchestrator.
 
 Runs launcher (deploy_environment.py) + extensions-service (provision-infra apply)
-then merges both manifests into platform-installer/state/<extension>/.
+then merges both manifests into bootstrap/state/<extension>/.
 
 Usage:
-    python platform-installer/install.py <extension> \\
-        --admin-profile acd-arbitium-tt-dev \\
+    # Lambda-only (default — no ECS cluster provisioned):
+    python bootstrap/install.py <extension> \\
+        --profile acd-arbitium-tt-dev \\
         --aws-region us-east-1 \\
-        --github-repo Org/launcher-repo \\
-        [--handlers-github-repo Org/handlers-repo] \\
-        [--handlers-enable-staging-role] \\
-        --launch-type ec2
+        --github-repo Org/repo
+
+    # Lambda + ECS (add ECS cluster, ECR, S3 results bucket):
+    python bootstrap/install.py <extension> \\
+        --profile acd-arbitium-tt-dev \\
+        --aws-region us-east-1 \\
+        --github-repo Org/repo \\
+        --launch-type ec2    # or fargate
 
     # Skip one of the two provisioning steps (useful for re-runs):
-    python platform-installer/install.py <extension> ... --skip-launcher
-    python platform-installer/install.py <extension> ... --skip-extensions
+    python bootstrap/install.py <extension> ... --skip-launcher
+    python bootstrap/install.py <extension> ... --skip-extensions
 
     # Only merge existing manifests without reprovisioning:
-    python platform-installer/install.py <extension> ... --merge-only
+    python bootstrap/install.py <extension> ... --merge-only
 
 Prerequisites:
     Run once to create/update the required venvs for each repo:
-        bash platform-installer/setup-venvs.sh
+        bash bootstrap/setup-venvs.sh
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from pathlib import Path
 _PLATFORM_INSTALLER_ROOT = Path(__file__).resolve().parent
 _WORKSPACE_ROOT = _PLATFORM_INSTALLER_ROOT.parent
 
-# Add platform-installer to sys.path so lib.merger is importable
+# Add bootstrap dir to sys.path so lib.merger is importable
 sys.path.insert(0, str(_PLATFORM_INSTALLER_ROOT))
 
 # ---------------------------------------------------------------------------
@@ -54,12 +59,12 @@ def _resolve_python(repo_label: str, venv_dir: Path) -> str:
     print(f"\nERROR: venv not found for {repo_label}.")
     print(f"  Expected: {venv_dir}")
     print(f"\n  Run the following to create all required venvs:")
-    print(f"    bash platform-installer/setup-venvs.sh")
+    print(f"    bash bootstrap/setup-venvs.sh")
     print(f"\n  Or set up {repo_label} standalone:")
     if repo_label == "launcher":
-        print(f"    cd launcher && python3 -m venv launch-venv && launch-venv/bin/pip install -r requirements.txt")
+        print(f"    cd launcher && python3.12 -m venv launch-venv && launch-venv/bin/pip install -r requirements.txt")
     else:
-        print(f"    cd extensions-service && python3 -m venv venv && venv/bin/pip install -r requirements.txt")
+        print(f"    cd extensions-service && python3.12 -m venv venv && venv/bin/pip install -r requirements.txt")
     sys.exit(1)
 
 
@@ -95,14 +100,14 @@ def _run_subprocess(cmd: list[str], cwd: Path, description: str) -> None:
         sys.exit(result.returncode)
 
 
-def _run_launcher(extension: str, admin_profile: str, aws_region: str, github_repo: str) -> None:
+def _run_launcher(extension: str, profile: str, aws_region: str, github_repo: str) -> None:
     launcher_scripts = _WORKSPACE_ROOT / "launcher" / "scripts"
     _run_subprocess(
         [
             _launcher_python(),
             "deploy_environment.py",
             extension,
-            "--aws-profile", admin_profile,
+            "--aws-profile", profile,
             "--aws-region", aws_region,
             "--github-repo", github_repo,
         ],
@@ -113,8 +118,8 @@ def _run_launcher(extension: str, admin_profile: str, aws_region: str, github_re
 
 def _run_extensions_service(
     extension: str,
-    admin_profile: str,
-    launch_type: str,
+    profile: str,
+    launch_type: str | None,
     handlers_github_repo: str,
     handlers_enable_staging_role: bool,
 ) -> None:
@@ -126,18 +131,19 @@ def _run_extensions_service(
         "provision-infra",
         "apply",
         "--profile",
-        admin_profile,
-        "--launch-type",
-        launch_type,
+        profile,
         "--github-repo",
         handlers_github_repo,
     ]
+    if launch_type is not None:
+        cmd += ["--launch-type", launch_type]
     if handlers_enable_staging_role:
         cmd.append("--enable-handlers-staging-role")
+    mode = f"launch-type={launch_type}" if launch_type else "lambda-only"
     _run_subprocess(
         cmd,
         cwd=ext_service,
-        description=f"Extensions-service: provision infra '{extension}' (launch-type={launch_type})",
+        description=f"Extensions-service: provision infra '{extension}' ({mode})",
     )
 
 
@@ -151,9 +157,9 @@ def main() -> None:
         help="Extension / environment name (e.g. arbitiumrs)",
     )
     parser.add_argument(
-        "--admin-profile",
+        "--profile",
         required=True,
-        help="AWS named profile with admin rights (e.g. acd-arbitium-tt-dev)",
+        help="AWS named profile with sufficient rights (e.g. acd-arbitium-tt-dev)",
     )
     parser.add_argument(
         "--aws-region",
@@ -163,7 +169,7 @@ def main() -> None:
     parser.add_argument(
         "--github-repo",
         required=True,
-        help="GitHub org/repo for launcher OIDC trust (e.g. Org/repo)",
+        help="GitHub org/repo trusted for release/OIDC deploy roles (e.g. Org/repo)",
     )
     parser.add_argument(
         "--handlers-github-repo",
@@ -177,9 +183,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--launch-type",
-        default="ec2",
+        default=None,
         choices=["ec2", "fargate"],
-        help="ECS launch type for extensions-service (default: ec2)",
+        help="ECS launch type: ec2 or fargate. Omit to provision Lambda-only (no ECS cluster).",
     )
     parser.add_argument(
         "--skip-launcher",
@@ -199,18 +205,18 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"\nPlatform installer — extension: {args.extension}")
-    print(f"  AWS profile : {args.admin_profile}")
+    print(f"  AWS profile : {args.profile}")
     print(f"  AWS region  : {args.aws_region}")
     handlers_repo = args.handlers_github_repo or args.github_repo
-    print(f"  GitHub repo (launcher) : {args.github_repo}")
+    print(f"  GitHub repo (release/OIDC) : {args.github_repo}")
     print(f"  GitHub repo (handlers) : {handlers_repo}")
-    print(f"  Launch type : {args.launch_type}")
+    print(f"  Launch type : {args.launch_type or 'lambda-only (no ECS)'}")
 
     if not args.merge_only:
         if not args.skip_launcher:
             _run_launcher(
                 extension=args.extension,
-                admin_profile=args.admin_profile,
+                profile=args.profile,
                 aws_region=args.aws_region,
                 github_repo=args.github_repo,
             )
@@ -220,7 +226,7 @@ def main() -> None:
         if not args.skip_extensions:
             _run_extensions_service(
                 extension=args.extension,
-                admin_profile=args.admin_profile,
+                profile=args.profile,
                 launch_type=args.launch_type,
                 handlers_github_repo=handlers_repo,
                 handlers_enable_staging_role=args.handlers_enable_staging_role,
