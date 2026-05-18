@@ -4,7 +4,7 @@ Produces under platform-installer/state/<extension>/:
   - platform_resources.json         Combined resource inventory (launcher + ECS + handlers OIDC)
   - platform_vars.production.json   Merged VARS/SECRETS for GitHub environment production (launcher repo)
   - platform_vars.staging.json      Merged VARS/SECRETS for staging (if launcher wrote staging.json)
-  - deploy_input.json               Ready-to-use deploy payload for extensions-service (lambda_config + ecs_environment)
+  - deploy_input.json               Handlers deploy + GitHub env (VARS/SECRETS, same shape as platform_vars)
   - env_config.py                   Extended env_config with ECS constants appended
 """
 
@@ -82,7 +82,9 @@ def merge_manifests(
 
     _write_platform_resources(platform_state, extension, aws_region, launcher_resources, ext_manifest, handlers_oidc)
     _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant)
-    _write_deploy_input(platform_state, launcher_state, extension, ext_manifest)
+    _write_deploy_input(
+        platform_state, launcher_state, extension, ext_manifest, handlers_oidc, tenant
+    )
     _write_env_config(platform_state, launcher_state / "env_config.py", ext_manifest)
     _remove_stale_alias_files(platform_state)
 
@@ -191,12 +193,6 @@ def _ecs_vars_subset(extension: str, ext_manifest: dict[str, Any]) -> dict[str, 
     return launcher_vars
 
 
-_LAMBDA_HANDLER = "lambda_router.lambda_handler"
-_LAMBDA_RUNTIME = "python3.12"
-_LAMBDA_TIMEOUT = 900
-_LAMBDA_MEMORY_SIZE = 3008
-
-
 def _launcher_secrets_for_stage(launcher_state: Path, stage: str) -> dict[str, str]:
     """SECRETS block from launcher/state/<ext>/production.json or staging.json."""
     launcher_file = "production.json" if stage == "production" else "staging.json"
@@ -217,54 +213,52 @@ def _deploy_input_payload(
     launcher_state: Path,
     ext_manifest: dict[str, Any],
     extension: str,
+    handlers_oidc: dict[str, Any] | None,
+    tenant: str | None,
 ) -> dict[str, Any]:
-    """Build deploy_input.json — the single deploy payload for extensions-service stage 2.
+    """Build deploy_input.json for extensions-service stage 2 and handlers GitHub Environment.
 
-    Contains:
-      lambda_config  — ready to pass to aws lambda create-function / update-function-configuration
-      ecs_environment — flat key/value env vars for ECS container tasks
-      ecr_image_uri   — ECR image URI for the ECS handlers image (if provisioned)
+    Shape matches platform_vars (GITHUB_REPOSITORY, ENVIRONMENT, VARS, SECRETS).
+    Deploy scripts merge VARS + SECRETS into Lambda/ECS runtime env (excluding RUNTIME_ENV_EXCLUDE).
     """
     ecs_vars = _ecs_vars_subset(extension, ext_manifest)
 
     launcher_vars = _launcher_vars_for_stage(launcher_state, "production")
     handler_vars = _platform_vars_for_handlers(launcher_vars)
 
-    # Secrets from launcher (e.g. OPENAI_API_KEY); exclude OIDC-only keys
-    launcher_secrets = _launcher_secrets_for_stage(launcher_state, "production")
-    launcher_secrets.pop("AWS_GITHUB_OIDC_ROLE_ARN", None)
-
-    # Combined env vars for both Lambda and ECS
-    all_vars: dict[str, str] = {**ecs_vars, **handler_vars, **launcher_secrets}
-
-    # Lambda env also needs PYTHONPATH for module resolution
-    lambda_env_vars: dict[str, str] = {"PYTHONPATH": "/var/task", **all_vars}
+    vars_payload: dict[str, str] = {**ecs_vars, **handler_vars}
 
     function_name: str = (
         (ext_manifest.get("lambda") or {}).get("function_name")
         or f"{extension}-handlers"
     )
-
-    lambda_config: dict[str, Any] = {
-        "FunctionName": function_name,
-        "Role": f"{extension}-handlers-role",
-        "Handler": _LAMBDA_HANDLER,
-        "Runtime": _LAMBDA_RUNTIME,
-        "Timeout": _LAMBDA_TIMEOUT,
-        "MemorySize": _LAMBDA_MEMORY_SIZE,
-        "Environment": {"Variables": lambda_env_vars},
-    }
+    vars_payload["LAMBDA_HANDLERS_FUNCTION_NAME"] = function_name
 
     ecr_image_uri: str = str((ext_manifest.get("ecr") or {}).get("image_uri") or "")
-
-    payload: dict[str, Any] = {
-        "lambda_config": lambda_config,
-        "ecs_environment": all_vars,
-    }
     if ecr_image_uri:
-        payload["ecr_image_uri"] = ecr_image_uri
+        vars_payload["ECR_IMAGE_URI"] = ecr_image_uri
 
-    return payload
+    secrets: dict[str, str] = {}
+    if handlers_oidc and handlers_oidc.get("role_arn_production"):
+        secrets["AWS_GITHUB_OIDC_ROLE_ARN"] = str(handlers_oidc["role_arn_production"])
+
+    launcher_secrets = _launcher_secrets_for_stage(launcher_state, "production")
+    launcher_secrets.pop("AWS_GITHUB_OIDC_ROLE_ARN", None)
+    secrets.update(launcher_secrets)
+
+    gh_repo = ""
+    if handlers_oidc:
+        gh_repo = str(handlers_oidc.get("github_repo") or "")
+    if not gh_repo:
+        launcher_json = _read_json(launcher_state / "production.json") or {}
+        gh_repo = str(launcher_json.get("GITHUB_REPOSITORY") or "")
+
+    return {
+        "GITHUB_REPOSITORY": gh_repo,
+        "ENVIRONMENT": _github_environment_label("production", tenant),
+        "VARS": vars_payload,
+        "SECRETS": secrets,
+    }
 
 
 def _write_deploy_input(
@@ -272,8 +266,12 @@ def _write_deploy_input(
     launcher_state: Path,
     extension: str,
     ext_manifest: dict[str, Any],
+    handlers_oidc: dict[str, Any] | None,
+    tenant: str | None,
 ) -> None:
-    payload = _deploy_input_payload(launcher_state, ext_manifest, extension)
+    payload = _deploy_input_payload(
+        launcher_state, ext_manifest, extension, handlers_oidc, tenant
+    )
     (platform_state / "deploy_input.json").write_text(
         json.dumps(payload, indent=2) + "\n",
         encoding="utf-8",

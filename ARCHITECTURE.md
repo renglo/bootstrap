@@ -111,7 +111,7 @@ python bootstrap/install.py <extension> \
 3. Merges outputs into `bootstrap/state/<extension>/`:
    - `platform_resources.json` — full JSON inventory
    - `platform_vars.production.json` / `platform_vars.staging.json` (launcher release repo)
-   - `deploy_input.json` — deploy payload for extensions-service (lambda_config + ecs_environment)
+   - `deploy_input.json` — handlers deploy + GitHub Environment (VARS / SECRETS)
    - `env_config.py` — Python config with launcher + ECS constants (ECS keys absent when lambda-only)
 
 **Idempotent:** re-running with the same flags updates IAM/ECS without destroying resources. Re-running without `--launch-type` on an environment that already has ECS preserves the ECS manifest sections.
@@ -255,46 +255,33 @@ Excludes `OPENAI_API_KEY` (user-managed secret).
 
 ### `deploy_input.json`
 
-Ready-to-use deploy payload for **extensions-service stage 2** (Lambda + ECS). Always generated — no OIDC prerequisite. Copy this file to `extensions-service/state/<extension>/deploy_input.json` to run a local deploy.
+Single file for **extensions-service stage 2** (local deploy) and **handlers GitHub Environment** (CI). Same shape as `platform_vars.*`: `GITHUB_REPOSITORY`, `ENVIRONMENT`, `VARS`, `SECRETS`.
 
-`lambda_config` is a complete `aws lambda create-function` / `update-function-configuration` payload: fixed constants (`Handler`, `Runtime`, `Timeout`, `MemorySize`) plus the IAM role by convention, and all environment variables merged from `provision_manifest` + launcher state (including secrets such as `OPENAI_API_KEY`). `ecs_environment` is the same flat key/value map for ECS container tasks. `ecr_image_uri` is included when an ECR repo was provisioned.
+Copy to `extensions-service/state/<extension>/deploy_input.json` for local deploy. For CI, run `python bootstrap/helpers/inject_github_env_vars.py --json bootstrap/state/<ext>/deploy_input.json` on the **handlers** repo.
+
+Deploy scripts merge `VARS` + `SECRETS` into Lambda/ECS runtime environment, except keys in `RUNTIME_ENV_EXCLUDE` (e.g. `AWS_GITHUB_OIDC_ROLE_ARN`, which is only for `configure-aws-credentials` in the workflow). Secrets such as `OPENAI_API_KEY` are included in runtime env when present in `SECRETS`.
+
+Lambda metadata (`Handler`, `Runtime`, `Timeout`, `MemorySize`, role name) are fixed constants in `extensions-service/deploy_input.py`; `FunctionName` comes from `VARS.LAMBDA_HANDLERS_FUNCTION_NAME`.
 
 ```json
 {
-  "lambda_config": {
-    "FunctionName": "arbitiumrs-handlers",
-    "Role": "arbitiumrs-handlers-role",
-    "Handler": "lambda_router.lambda_handler",
-    "Runtime": "python3.12",
-    "Timeout": 900,
-    "MemorySize": 3008,
-    "Environment": {
-      "Variables": {
-        "PYTHONPATH": "/var/task",
-        "WL_NAME": "arbitiumrs",
-        "AWS_REGION": "us-east-1",
-        "ECS_CLUSTER": "arbitiumrs-handlers",
-        "ECS_TASK_DEFINITION": "arbitiumrs-handlers-ecs",
-        "ECS_LAUNCH_TYPE": "ec2",
-        "ECS_SUBNETS": "subnet-xxx,subnet-yyy",
-        "ECS_SECURITY_GROUPS": "sg-...",
-        "ECS_RESULTS_BUCKET": "arbitiumrs-handlers-ecs-...",
-        "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:...",
-        "DYNAMODB_ENTITY_TABLE": "arbitiumrs_entities",
-        "COGNITO_USERPOOL_ID": "...",
-        "S3_BUCKET_NAME": "...",
-        "ROLE_ARN": "arn:aws:iam::...",
-        "OPENAI_API_KEY": "..."
-      }
-    }
-  },
-  "ecs_environment": {
+  "GITHUB_REPOSITORY": "Org/handlers-repo",
+  "ENVIRONMENT": "production",
+  "VARS": {
     "WL_NAME": "arbitiumrs",
     "AWS_REGION": "us-east-1",
+    "LAMBDA_HANDLERS_FUNCTION_NAME": "arbitiumrs-handlers",
+    "ECR_IMAGE_URI": "982081058012.dkr.ecr.us-east-1.amazonaws.com/arbitiumrs-handlers-ecs:latest",
     "ECS_CLUSTER": "arbitiumrs-handlers",
-    "...": "..."
+    "DYNAMODB_ENTITY_TABLE": "arbitiumrs_entities",
+    "COGNITO_USERPOOL_ID": "...",
+    "S3_BUCKET_NAME": "...",
+    "ROLE_ARN": "arn:aws:iam::..."
   },
-  "ecr_image_uri": "982081058012.dkr.ecr.us-east-1.amazonaws.com/arbitiumrs-handlers-ecs:latest"
+  "SECRETS": {
+    "AWS_GITHUB_OIDC_ROLE_ARN": "arn:aws:iam::...:role/GitHubActionsHandlersRole-arbitiumrs-production",
+    "OPENAI_API_KEY": "..."
+  }
 }
 ```
 

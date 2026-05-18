@@ -111,7 +111,7 @@ python bootstrap/uninstall.py <extension> \
 
 ## Sync GitHub environment variables
 
-After you have GitHub payloads (for example `production.json` / `staging.json` under `launcher/state/<env>/`, or merged files under `bootstrap/state/<extension>/`), push variables and secrets to the repo’s GitHub Environments:
+After you have GitHub payloads (`launcher/state/<env>/production.json`, `bootstrap/state/<extension>/platform_vars.production.json` for the **releases** repo, or `bootstrap/state/<extension>/deploy_input.json` for the **handlers** repo), push variables and secrets to GitHub Environments:
 
 ```bash
 python bootstrap/helpers/inject_github_env_vars.py --json path/to/environment.json
