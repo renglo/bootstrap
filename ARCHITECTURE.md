@@ -18,10 +18,7 @@ infra-installer/
             ├── platform_resources.json          # Combined resource inventory
             ├── platform_vars.production.json    # Merged VARS + SECRETS (production)
             ├── platform_vars.staging.json       # Merged VARS + SECRETS (staging, if launcher wrote staging.json)
-            ├── platform_vars.json               # Same as production (backward compatibility)
-            ├── handlers_vars.production.json    # Handlers-repo ECS + OIDC (if handlers OIDC was provisioned)
-            ├── handlers_vars.staging.json       # Same for staging OIDC role when present
-            ├── handlers_vars.json               # Alias of handlers production
+            ├── deploy_input.json                # Ready-to-use deploy payload for extensions-service
             └── env_config.py                    # Extended Python config (launcher + ECS constants)
 ```
 
@@ -113,8 +110,8 @@ python bootstrap/install.py <extension> \
 
 3. Merges outputs into `bootstrap/state/<extension>/`:
    - `platform_resources.json` — full JSON inventory
-   - `platform_vars.production.json` / `platform_vars.staging.json` / `platform_vars.json`
-   - `handlers_vars.*` — handlers GitHub payloads when OIDC exists
+   - `platform_vars.production.json` / `platform_vars.staging.json` (launcher release repo)
+   - `deploy_input.json` — deploy payload for extensions-service (lambda_config + ecs_environment)
    - `env_config.py` — Python config with launcher + ECS constants (ECS keys absent when lambda-only)
 
 **Idempotent:** re-running with the same flags updates IAM/ECS without destroying resources. Re-running without `--launch-type` on an environment that already has ECS preserves the ECS manifest sections.
@@ -128,6 +125,7 @@ python bootstrap/install.py <extension> \
 | `--launch-type` | *(none — lambda-only)* | `ec2` or `fargate`: also provision ECS cluster + ECR + S3 results bucket |
 | `--handlers-github-repo` | same as `--github-repo` | GitHub org/repo for **handlers** OIDC (extensions-service CI) |
 | `--handlers-enable-staging-role` | off | Second handlers OIDC role for GitHub Environment `staging` |
+| `--tenant` | *(none)* | Prefix `ENVIRONMENT` in merged bootstrap JSON only: `{tenant}_{production\|staging}` (e.g. `acme_production`) |
 | `--skip-launcher` | off | Skip launcher deploy (extensions-service only) |
 | `--skip-extensions` | off | Skip extensions-service provision (launcher only) |
 | `--merge-only` | off | Skip all provisioning; only (re)merge existing state files |
@@ -210,6 +208,10 @@ Complete resource inventory used for uninstall and tooling:
     "github_oidc": { "production_role_arn": "...", "staging_role_arn": "..." }
   },
   "extensions_service": {
+    "lambda": {
+      "function_name": "arbitiumrs-handlers",
+      "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:us-east-1:123456789012:function:arbitiumrs-handlers"
+    },
     "ecr": { "repository": "arbitiumrs-handlers-ecs" },
     "ecs": { "cluster": "arbitiumrs-handlers", "launch_type": "ec2", "subnets": ["..."] },
     "buckets": { "ecs_results_bucket": "arbitiumrs-handlers-ecs-..." },
@@ -225,9 +227,9 @@ Complete resource inventory used for uninstall and tooling:
 }
 ```
 
-### `platform_vars.production.json` / `platform_vars.staging.json` / `platform_vars.json`
+### `platform_vars.production.json` / `platform_vars.staging.json`
 
-Per-environment GitHub payloads: each mirrors `launcher/state/<ext>/production.json` or `staging.json`, with ECS keys merged from `provision_manifest.json`. `platform_vars.json` is a copy of production for backward compatibility.
+Per-environment GitHub payloads for the **launcher / releases** repo: each mirrors `launcher/state/<ext>/production.json` or `staging.json`, with ECS keys merged from `provision_manifest.json`.
 
 Excludes `OPENAI_API_KEY` (user-managed secret).
 
@@ -238,6 +240,7 @@ Excludes `OPENAI_API_KEY` (user-managed secret).
   "VARS": {
     "WL_NAME": "arbitiumrs",
     "BASE_URL": "https://...",
+    "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:us-east-1:123456789012:function:arbitiumrs-handlers",
     "ECS_CLUSTER": "arbitiumrs-handlers",
     "ECS_TASK_DEFINITION": "arbitiumrs-handlers-ecs",
     "ECS_LAUNCH_TYPE": "ec2",
@@ -250,27 +253,48 @@ Excludes `OPENAI_API_KEY` (user-managed secret).
 }
 ```
 
-### `handlers_vars.production.json` / `handlers_vars.staging.json` / `handlers_vars.json`
+### `deploy_input.json`
 
-Present when handlers OIDC was provisioned (`extensions-service/state/<ext>/handlers_github_oidc.json`). Same top-level shape as `platform_vars.*`, but `GITHUB_REPOSITORY` is the handlers repo, `VARS` contains only ECS-related keys (plus `WL_NAME`), and `SECRETS.AWS_GITHUB_OIDC_ROLE_ARN` is the **handlers** deploy role (not the launcher backend role).
+Ready-to-use deploy payload for **extensions-service stage 2** (Lambda + ECS). Always generated — no OIDC prerequisite. Copy this file to `extensions-service/state/<extension>/deploy_input.json` to run a local deploy.
+
+`lambda_config` is a complete `aws lambda create-function` / `update-function-configuration` payload: fixed constants (`Handler`, `Runtime`, `Timeout`, `MemorySize`) plus the IAM role by convention, and all environment variables merged from `provision_manifest` + launcher state (including secrets such as `OPENAI_API_KEY`). `ecs_environment` is the same flat key/value map for ECS container tasks. `ecr_image_uri` is included when an ECR repo was provisioned.
 
 ```json
 {
-  "GITHUB_REPOSITORY": "Org/handlers-repo",
-  "ENVIRONMENT": "production",
-  "VARS": {
+  "lambda_config": {
+    "FunctionName": "arbitiumrs-handlers",
+    "Role": "arbitiumrs-handlers-role",
+    "Handler": "lambda_router.lambda_handler",
+    "Runtime": "python3.12",
+    "Timeout": 900,
+    "MemorySize": 3008,
+    "Environment": {
+      "Variables": {
+        "PYTHONPATH": "/var/task",
+        "WL_NAME": "arbitiumrs",
+        "AWS_REGION": "us-east-1",
+        "ECS_CLUSTER": "arbitiumrs-handlers",
+        "ECS_TASK_DEFINITION": "arbitiumrs-handlers-ecs",
+        "ECS_LAUNCH_TYPE": "ec2",
+        "ECS_SUBNETS": "subnet-xxx,subnet-yyy",
+        "ECS_SECURITY_GROUPS": "sg-...",
+        "ECS_RESULTS_BUCKET": "arbitiumrs-handlers-ecs-...",
+        "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:...",
+        "DYNAMODB_ENTITY_TABLE": "arbitiumrs_entities",
+        "COGNITO_USERPOOL_ID": "...",
+        "S3_BUCKET_NAME": "...",
+        "ROLE_ARN": "arn:aws:iam::...",
+        "OPENAI_API_KEY": "..."
+      }
+    }
+  },
+  "ecs_environment": {
     "WL_NAME": "arbitiumrs",
     "AWS_REGION": "us-east-1",
     "ECS_CLUSTER": "arbitiumrs-handlers",
-    "ECS_TASK_DEFINITION": "arbitiumrs-handlers-ecs",
-    "ECS_LAUNCH_TYPE": "ec2",
-    "ECS_SUBNETS": "subnet-xxx,subnet-yyy",
-    "ECS_SECURITY_GROUPS": "sg-...",
-    "ECS_RESULTS_BUCKET": "arbitiumrs-handlers-ecs-..."
+    "...": "..."
   },
-  "SECRETS": {
-    "AWS_GITHUB_OIDC_ROLE_ARN": "arn:aws:iam::...:role/GitHubActionsHandlersRole-arbitiumrs-production"
-  }
+  "ecr_image_uri": "982081058012.dkr.ecr.us-east-1.amazonaws.com/arbitiumrs-handlers-ecs:latest"
 }
 ```
 
@@ -316,10 +340,7 @@ bootstrap/state/<extension>/
     platform_resources.json
     platform_vars.production.json
     platform_vars.staging.json
-    platform_vars.json
-    handlers_vars.production.json
-    handlers_vars.staging.json
-    handlers_vars.json
+    deploy_input.json
     env_config.py
 ```
 

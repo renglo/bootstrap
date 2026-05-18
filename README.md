@@ -14,7 +14,11 @@ Local machine must have:
 - GitHub API (Optional - only renglo DevOps)
 - WSL (only for windows)
 
-Also, a DevOps profile must be configured in the AWS CLI, the required policy can be obtained with bootstrap/helpers/generate_env_deployment_tt_policy.py
+Also, configure a DevOps-capable AWS CLI profile.
+
+- **Minimal IAM policy for scripts that provision an environment:** run  
+  `python bootstrap/helpers/generate_env_deployment_tt_policy.py <env> --aws-profile <profile>`  
+  (writes `bootstrap/state/<env>/<env>_deployment_tt_policy.json` by default.)
 
 Clone **bootstrap** into a <infra-launcher> folder, alongside extensions-service and **launcher**
 ```bash
@@ -75,6 +79,7 @@ Both modes are **idempotent**: re-running updates IAM and (if `--launch-type` is
 | `--skip-launcher` | Only (re)run extensions + merge |
 | `--skip-extensions` | Only launcher + merge |
 | `--merge-only` | No AWS changes; re-merge existing `launcher/state` + `extensions-service/state` into `bootstrap/state` |
+| `--tenant <tenant_name>` | Prefix `ENVIRONMENT` in `platform_vars.*` only (`tenant_name_production`, `tenant_name_staging`) |
 
 **Non-default VPC:** run extensions standalone with `--vpc vpc-...` — see [extensions-service/README.md](../extensions-service/README.md).
 
@@ -104,11 +109,15 @@ python bootstrap/uninstall.py <extension> \
 
 ---
 
-## More detail
+## Sync GitHub environment variables
 
-- Full layout, JSON shapes, and design: [ARCHITECTURE.md](ARCHITECTURE.md)
-- Launcher-only deploy: [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)
-- Extensions-only: [extensions-service/README.md](../extensions-service/README.md)
+After you have GitHub payloads (for example `production.json` / `staging.json` under `launcher/state/<env>/`, or merged files under `bootstrap/state/<extension>/`), push variables and secrets to the repo’s GitHub Environments:
+
+```bash
+python bootstrap/helpers/inject_github_env_vars.py --json path/to/environment.json
+```
+
+Use `--repo owner/repo` or `--environment <name>` if they are not set in or implied by the JSON. Requires authenticated **Github API** (`gh auth login`).
 
 ---
 
@@ -117,8 +126,18 @@ python bootstrap/uninstall.py <extension> \
 If `bash bootstrap/setup-venvs.sh` fails with errors like `$'\r': command not found`, or `set: pipefail` / `invalid option name`, the script probably has **Windows (CRLF) line endings**—common when the workspace is on Windows or synced (for example OneDrive). From **WSL** or Linux, strip carriage returns and run the script again:
 
 ```bash
-sed -i 's/\r$//' bootstrap/setup-venvs.sh
-bash bootstrap/setup-venvs.sh
+sed -i 's/\r$//' <repo>/<file_name.sh>
 ```
 
-If you have `dos2unix` installed: `dos2unix bootstrap/setup-venvs.sh`. In **Cursor/VS Code**, you can also switch the file’s line ending from **CRLF** to **LF** in the status bar, then save.
+or user for all sh files:
+```bash
+find . -name "*.sh" -exec sed -i 's/\r$//' {} \;
+```
+
+---
+
+## More detail
+
+- Full layout, JSON shapes, and design: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Launcher-only deploy: [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)
+- Extensions-only: [extensions-service/README.md](../extensions-service/README.md)

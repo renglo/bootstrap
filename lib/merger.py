@@ -2,12 +2,9 @@
 
 Produces under platform-installer/state/<extension>/:
   - platform_resources.json         Combined resource inventory (launcher + ECS + handlers OIDC)
-  - platform_vars.production.json   Merged VARS/SECRETS for GitHub environment production
+  - platform_vars.production.json   Merged VARS/SECRETS for GitHub environment production (launcher repo)
   - platform_vars.staging.json      Merged VARS/SECRETS for staging (if launcher wrote staging.json)
-  - platform_vars.json              Same as production (backward compatibility)
-  - handlers_vars.production.json   Handlers-repo ECS vars + OIDC role (if handlers_github_oidc.json exists)
-  - handlers_vars.staging.json      Same for staging OIDC role when present
-  - handlers_vars.json              Alias of handlers production
+  - deploy_input.json               Ready-to-use deploy payload for extensions-service (lambda_config + ecs_environment)
   - env_config.py                   Extended env_config with ECS constants appended
 """
 
@@ -33,17 +30,47 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def _normalize_tenant(tenant: str | None) -> str | None:
+    if tenant is None:
+        return None
+    value = tenant.strip()
+    if not value:
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+    if any(ch not in allowed for ch in value):
+        raise ValueError(
+            f"Invalid --tenant {tenant!r}: use letters, numbers, '-' and '_' only."
+        )
+    return value
+
+
+def _github_environment_label(base_environment: str, tenant: str | None) -> str:
+    """GitHub Environment name for bootstrap state JSON (optional tenant prefix)."""
+    base = (base_environment or "production").strip() or "production"
+    if not tenant:
+        return base
+    prefix = f"{tenant}_"
+    if base.startswith(prefix):
+        return base
+    return f"{prefix}{base}"
+
+
 def merge_manifests(
     extension: str,
     launcher_root: Path,
     extensions_service_root: Path,
     platform_installer_root: Path,
     aws_region: str,
+    tenant: str | None = None,
 ) -> Path:
     """Merge launcher + extensions-service outputs into platform-installer state.
 
+    When tenant is set, ENVIRONMENT in platform_vars.* becomes {tenant}_{environment}
+    (e.g. acme_production). Does not alter launcher or extensions-service state.
+
     Returns the platform state directory path.
     """
+    tenant = _normalize_tenant(tenant)
     launcher_state = launcher_root / "state" / extension
     ext_state = extensions_service_root / "state" / extension
     platform_state = platform_installer_root / "state" / extension
@@ -54,16 +81,16 @@ def merge_manifests(
     handlers_oidc = _read_json(ext_state / "handlers_github_oidc.json")
 
     _write_platform_resources(platform_state, extension, aws_region, launcher_resources, ext_manifest, handlers_oidc)
-    _write_all_platform_vars(platform_state, launcher_state, ext_manifest)
-    _write_handlers_vars(platform_state, extension, ext_manifest, handlers_oidc)
+    _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant)
+    _write_deploy_input(platform_state, launcher_state, extension, ext_manifest)
     _write_env_config(platform_state, launcher_state / "env_config.py", ext_manifest)
+    _remove_stale_alias_files(platform_state)
 
     print(f"\nPlatform state written to: {platform_state}")
     print("  - platform_resources.json")
     print("  - platform_vars.production.json")
     print("  - platform_vars.staging.json (if launcher/staging.json exists)")
-    print("  - platform_vars.json (alias of production)")
-    print("  - handlers_vars*.json (if extensions-service state has handlers_github_oidc.json)")
+    print("  - deploy_input.json")
     print("  - env_config.py")
 
     return platform_state
@@ -91,8 +118,51 @@ def _handlers_github_oidc_block(handlers_oidc: dict[str, Any] | None) -> dict[st
     return block
 
 
+def _remove_stale_alias_files(platform_state: Path) -> None:
+    """Drop legacy files no longer written by merge."""
+    for name in (
+        "platform_vars.json",
+        "handlers_vars.json",
+        "handlers_vars.production.json",
+        "handlers_vars.staging.json",
+    ):
+        path = platform_state / name
+        if path.is_file():
+            path.unlink()
+
+
+def _launcher_vars_for_stage(launcher_state: Path, stage: str) -> dict[str, str]:
+    """VARS block from launcher/state/<ext>/production.json or staging.json."""
+    launcher_file = "production.json" if stage == "production" else "staging.json"
+    launcher_json = _read_json(launcher_state / launcher_file)
+    if not launcher_json and stage == "staging":
+        launcher_json = _read_json(launcher_state / "production.json")
+    if not launcher_json:
+        return {}
+    raw = launcher_json.get("VARS") or {}
+    return {
+        str(key): str(value)
+        for key, value in raw.items()
+        if value is not None and str(value).strip() != ""
+    }
+
+
+def _platform_vars_for_handlers(launcher_vars: dict[str, str]) -> dict[str, str]:
+    """Subset of launcher VARS shared with handlers repo (DynamoDB, Cognito, S3, runtime role)."""
+    out: dict[str, str] = {}
+    for key, value in launcher_vars.items():
+        if key.startswith("DYNAMODB_") or key.startswith("COGNITO_"):
+            out[key] = value
+    if launcher_vars.get("S3_BUCKET_NAME"):
+        out["S3_BUCKET_NAME"] = launcher_vars["S3_BUCKET_NAME"]
+    for key in ("WL_NAME", "AWS_REGION", "ROLE_ARN"):
+        if launcher_vars.get(key):
+            out[key] = launcher_vars[key]
+    return out
+
+
 def _ecs_vars_subset(extension: str, ext_manifest: dict[str, Any]) -> dict[str, str]:
-    """ECS-related VARS for handlers workflows (no launcher API/Cognito keys)."""
+    """ECS + handlers Lambda ARN from provision_manifest (extensions-service)."""
     launcher_vars: dict[str, str] = {"WL_NAME": extension}
     ecs = ext_manifest.get("ecs") or {}
     buckets = ext_manifest.get("buckets") or {}
@@ -114,52 +184,100 @@ def _ecs_vars_subset(extension: str, ext_manifest: dict[str, Any]) -> dict[str, 
         launcher_vars["ECS_SECURITY_GROUPS"] = ",".join(sgs) if isinstance(sgs, list) else str(sgs)
     if buckets.get("ecs_results_bucket"):
         launcher_vars["ECS_RESULTS_BUCKET"] = str(buckets["ecs_results_bucket"])
+    handlers_lambda = ext_manifest.get("lambda") or {}
+    handlers_arn = handlers_lambda.get("LAMBDA_EXTERNAL_HANDLERS_ARN")
+    if handlers_arn:
+        launcher_vars["LAMBDA_EXTERNAL_HANDLERS_ARN"] = str(handlers_arn)
     return launcher_vars
 
 
-def _handlers_vars_payload(
-    handlers_oidc: dict[str, Any],
-    ext_manifest: dict[str, Any],
-    extension: str,
-    environment: str,
-) -> dict[str, Any] | None:
-    if environment == "production":
-        role_arn = str(handlers_oidc.get("role_arn_production") or "")
-    else:
-        role_arn = str(handlers_oidc.get("role_arn_staging") or "")
-    if not role_arn:
-        return None
-    gh_repo = str(handlers_oidc.get("github_repo") or "")
+_LAMBDA_HANDLER = "lambda_router.lambda_handler"
+_LAMBDA_RUNTIME = "python3.12"
+_LAMBDA_TIMEOUT = 900
+_LAMBDA_MEMORY_SIZE = 3008
+
+
+def _launcher_secrets_for_stage(launcher_state: Path, stage: str) -> dict[str, str]:
+    """SECRETS block from launcher/state/<ext>/production.json or staging.json."""
+    launcher_file = "production.json" if stage == "production" else "staging.json"
+    launcher_json = _read_json(launcher_state / launcher_file)
+    if not launcher_json and stage == "staging":
+        launcher_json = _read_json(launcher_state / "production.json")
+    if not launcher_json:
+        return {}
+    raw = launcher_json.get("SECRETS") or {}
     return {
-        "GITHUB_REPOSITORY": gh_repo,
-        "ENVIRONMENT": environment,
-        "VARS": _ecs_vars_subset(extension, ext_manifest),
-        "SECRETS": {"AWS_GITHUB_OIDC_ROLE_ARN": role_arn},
+        str(key): str(value)
+        for key, value in raw.items()
+        if value is not None and str(value).strip() != ""
     }
 
 
-def _write_handlers_vars(
+def _deploy_input_payload(
+    launcher_state: Path,
+    ext_manifest: dict[str, Any],
+    extension: str,
+) -> dict[str, Any]:
+    """Build deploy_input.json — the single deploy payload for extensions-service stage 2.
+
+    Contains:
+      lambda_config  — ready to pass to aws lambda create-function / update-function-configuration
+      ecs_environment — flat key/value env vars for ECS container tasks
+      ecr_image_uri   — ECR image URI for the ECS handlers image (if provisioned)
+    """
+    ecs_vars = _ecs_vars_subset(extension, ext_manifest)
+
+    launcher_vars = _launcher_vars_for_stage(launcher_state, "production")
+    handler_vars = _platform_vars_for_handlers(launcher_vars)
+
+    # Secrets from launcher (e.g. OPENAI_API_KEY); exclude OIDC-only keys
+    launcher_secrets = _launcher_secrets_for_stage(launcher_state, "production")
+    launcher_secrets.pop("AWS_GITHUB_OIDC_ROLE_ARN", None)
+
+    # Combined env vars for both Lambda and ECS
+    all_vars: dict[str, str] = {**ecs_vars, **handler_vars, **launcher_secrets}
+
+    # Lambda env also needs PYTHONPATH for module resolution
+    lambda_env_vars: dict[str, str] = {"PYTHONPATH": "/var/task", **all_vars}
+
+    function_name: str = (
+        (ext_manifest.get("lambda") or {}).get("function_name")
+        or f"{extension}-handlers"
+    )
+
+    lambda_config: dict[str, Any] = {
+        "FunctionName": function_name,
+        "Role": f"{extension}-handlers-role",
+        "Handler": _LAMBDA_HANDLER,
+        "Runtime": _LAMBDA_RUNTIME,
+        "Timeout": _LAMBDA_TIMEOUT,
+        "MemorySize": _LAMBDA_MEMORY_SIZE,
+        "Environment": {"Variables": lambda_env_vars},
+    }
+
+    ecr_image_uri: str = str((ext_manifest.get("ecr") or {}).get("image_uri") or "")
+
+    payload: dict[str, Any] = {
+        "lambda_config": lambda_config,
+        "ecs_environment": all_vars,
+    }
+    if ecr_image_uri:
+        payload["ecr_image_uri"] = ecr_image_uri
+
+    return payload
+
+
+def _write_deploy_input(
     platform_state: Path,
+    launcher_state: Path,
     extension: str,
     ext_manifest: dict[str, Any],
-    handlers_oidc: dict[str, Any] | None,
 ) -> None:
-    if not handlers_oidc:
-        return
-    production_text: str | None = None
-    prod = _handlers_vars_payload(handlers_oidc, ext_manifest, extension, "production")
-    if prod:
-        production_text = json.dumps(prod, indent=2) + "\n"
-        (platform_state / "handlers_vars.production.json").write_text(production_text, encoding="utf-8")
-
-    staging = _handlers_vars_payload(handlers_oidc, ext_manifest, extension, "staging")
-    if staging:
-        (platform_state / "handlers_vars.staging.json").write_text(
-            json.dumps(staging, indent=2) + "\n", encoding="utf-8"
-        )
-
-    if production_text is not None:
-        (platform_state / "handlers_vars.json").write_text(production_text, encoding="utf-8")
+    payload = _deploy_input_payload(launcher_state, ext_manifest, extension)
+    (platform_state / "deploy_input.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_platform_resources(
@@ -193,6 +311,7 @@ def _write_platform_resources(
             "github_oidc": launcher_resources.get("github_oidc", {}),
         },
         "extensions_service": {
+            "lambda": ext_manifest.get("lambda", {}),
             "ecr": ext_manifest.get("ecr", {}),
             "ecs": ext_manifest.get("ecs", {}),
             "buckets": ext_manifest.get("buckets", {}),
@@ -208,6 +327,7 @@ def _write_platform_resources(
 def _build_platform_vars_payload(
     launcher_env_json: dict[str, Any],
     ext_manifest: dict[str, Any],
+    tenant: str | None,
 ) -> dict[str, Any]:
     """Merge one launcher environment JSON (production or staging) with ECS from provision_manifest."""
     launcher_vars: dict[str, str] = dict(launcher_env_json.get("VARS") or {})
@@ -232,12 +352,16 @@ def _build_platform_vars_payload(
         launcher_vars["ECS_SECURITY_GROUPS"] = ",".join(sgs) if isinstance(sgs, list) else str(sgs)
     if buckets.get("ecs_results_bucket"):
         launcher_vars["ECS_RESULTS_BUCKET"] = str(buckets["ecs_results_bucket"])
+    handlers_lambda = ext_manifest.get("lambda") or {}
+    handlers_arn = handlers_lambda.get("LAMBDA_EXTERNAL_HANDLERS_ARN")
+    if handlers_arn:
+        launcher_vars["LAMBDA_EXTERNAL_HANDLERS_ARN"] = str(handlers_arn)
 
     env_label = str(launcher_env_json.get("ENVIRONMENT") or "").strip() or "production"
 
     return {
         "GITHUB_REPOSITORY": str(launcher_env_json.get("GITHUB_REPOSITORY", "") or ""),
-        "ENVIRONMENT": env_label,
+        "ENVIRONMENT": _github_environment_label(env_label, tenant),
         "VARS": launcher_vars,
         "SECRETS": {
             k: v
@@ -251,25 +375,22 @@ def _write_all_platform_vars(
     platform_state: Path,
     launcher_state: Path,
     ext_manifest: dict[str, Any],
+    tenant: str | None,
 ) -> None:
     """Write platform_vars.<stage>.json for each launcher environment file present."""
     pairs: list[tuple[str, str]] = [
         ("production.json", "platform_vars.production.json"),
         ("staging.json", "platform_vars.staging.json"),
     ]
-    production_text: str | None = None
     for launcher_name, out_name in pairs:
         launcher_json = _read_json(launcher_state / launcher_name)
         if not launcher_json:
             continue
-        payload = _build_platform_vars_payload(launcher_json, ext_manifest)
-        text = json.dumps(payload, indent=2) + "\n"
-        (platform_state / out_name).write_text(text, encoding="utf-8")
-        if launcher_name == "production.json":
-            production_text = text
-
-    if production_text is not None:
-        (platform_state / "platform_vars.json").write_text(production_text, encoding="utf-8")
+        payload = _build_platform_vars_payload(launcher_json, ext_manifest, tenant)
+        (platform_state / out_name).write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def _write_env_config(
@@ -309,6 +430,11 @@ def _write_env_config(
     if sgs:
         sgs_str = ",".join(sgs) if isinstance(sgs, list) else sgs
         ecs_lines.append(f"ECS_SECURITY_GROUPS = {repr(sgs_str)}")
+
+    handlers_lambda = ext_manifest.get("lambda") or {}
+    handlers_arn = handlers_lambda.get("LAMBDA_EXTERNAL_HANDLERS_ARN")
+    if handlers_arn:
+        ecs_lines.append(f"LAMBDA_EXTERNAL_HANDLERS_ARN = {repr(handlers_arn)}")
 
     content = base_content + "\n".join(ecs_lines) + "\n"
     out_path.write_text(content, encoding="utf-8")

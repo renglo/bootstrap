@@ -202,6 +202,14 @@ def main() -> None:
         action="store_true",
         help="Skip provisioning; only merge existing state manifests",
     )
+    parser.add_argument(
+        "--tenant",
+        default=None,
+        help=(
+            "Optional tenant prefix for ENVIRONMENT in bootstrap state JSON only "
+            "(e.g. acme → ENVIRONMENT acme_production). Does not change launcher or extensions-service."
+        ),
+    )
     args = parser.parse_args()
 
     print(f"\nPlatform installer — extension: {args.extension}")
@@ -211,6 +219,8 @@ def main() -> None:
     print(f"  GitHub repo (release/OIDC) : {args.github_repo}")
     print(f"  GitHub repo (handlers) : {handlers_repo}")
     print(f"  Launch type : {args.launch_type or 'lambda-only (no ECS)'}")
+    if args.tenant:
+        print(f"  Tenant      : {args.tenant.strip()} (GitHub ENVIRONMENT → {args.tenant.strip()}_<stage>)")
 
     if not args.merge_only:
         if not args.skip_launcher:
@@ -245,6 +255,7 @@ def main() -> None:
         extensions_service_root=_WORKSPACE_ROOT / "extensions-service",
         platform_installer_root=_PLATFORM_INSTALLER_ROOT,
         aws_region=args.aws_region,
+        tenant=args.tenant,
     )
 
     print(f"\nInstallation complete for extension: {args.extension}")
@@ -254,10 +265,7 @@ def main() -> None:
         "platform_resources.json",
         "platform_vars.production.json",
         "platform_vars.staging.json",
-        "platform_vars.json",
-        "handlers_vars.production.json",
-        "handlers_vars.staging.json",
-        "handlers_vars.json",
+        "deploy_input.json",
         "env_config.py",
     ):
         fpath = platform_state / fname
