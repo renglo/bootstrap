@@ -81,11 +81,22 @@ def merge_manifests(
     handlers_oidc = _read_json(ext_state / "handlers_github_oidc.json")
 
     _write_platform_resources(platform_state, extension, aws_region, launcher_resources, ext_manifest, handlers_oidc)
-    _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant)
+    _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant, launcher_resources)
     _write_deploy_input(
-        platform_state, launcher_state, extension, ext_manifest, handlers_oidc, tenant
+        platform_state,
+        launcher_state,
+        extension,
+        ext_manifest,
+        handlers_oidc,
+        tenant,
+        launcher_resources,
     )
-    _write_env_config(platform_state, launcher_state / "env_config.py", ext_manifest)
+    _write_env_config(
+        platform_state,
+        launcher_state / "env_config.py",
+        ext_manifest,
+        launcher_resources,
+    )
     _remove_stale_alias_files(platform_state)
 
     print(f"\nPlatform state written to: {platform_state}")
@@ -131,6 +142,53 @@ def _remove_stale_alias_files(platform_state: Path) -> None:
         path = platform_state / name
         if path.is_file():
             path.unlink()
+
+
+def _normalize_websocket_urls(connections_url: str, websocket_url: str) -> dict[str, str]:
+    """
+    Canonical WEBSOCKET_* vars for JSON / Lambda env.
+    WEBSOCKET_CONNECTIONS = https management API base; WEBSOCKET_URL / VITE_WEBSOCKET_URL = wss.
+    """
+    c = (connections_url or "").strip().rstrip("/")
+    w = (websocket_url or "").strip().rstrip("/")
+    if c.startswith("wss://"):
+        w = w or c
+        c = "https://" + c[len("wss://") :]
+    elif c.startswith("https://") and not w:
+        w = "wss://" + c[len("https://") :]
+    if w.startswith("https://"):
+        w = "wss://" + w[len("https://") :]
+    out: dict[str, str] = {}
+    if c:
+        out["WEBSOCKET_CONNECTIONS"] = c
+    if w:
+        out["WEBSOCKET_URL"] = w
+        out["VITE_WEBSOCKET_URL"] = w
+    return out
+
+
+def _websocket_vars_from_backend_stage(
+    launcher_resources: dict[str, Any], stage: str
+) -> dict[str, str]:
+    """Read websocket URLs from launcher created_resources.json backend.<stage>."""
+    backend = launcher_resources.get("backend") or {}
+    stage_data = backend.get(stage) if isinstance(backend.get(stage), dict) else {}
+    return _normalize_websocket_urls(
+        str(stage_data.get("websocket_connections_url") or ""),
+        str(stage_data.get("websocket_url") or ""),
+    )
+
+
+def _apply_websocket_to_vars(
+    vars_dict: dict[str, str],
+    launcher_resources: dict[str, Any] | None,
+    stage: str,
+) -> None:
+    """Set WEBSOCKET_* on a VARS dict from created_resources (canonical https/wss)."""
+    if not launcher_resources:
+        return
+    for key, value in _websocket_vars_from_backend_stage(launcher_resources, stage).items():
+        vars_dict[key] = value
 
 
 def _launcher_vars_for_stage(launcher_state: Path, stage: str) -> dict[str, str]:
@@ -215,6 +273,7 @@ def _deploy_input_payload(
     extension: str,
     handlers_oidc: dict[str, Any] | None,
     tenant: str | None,
+    launcher_resources: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build deploy_input.json for extensions-service stage 2 and handlers GitHub Environment.
 
@@ -224,9 +283,13 @@ def _deploy_input_payload(
     ecs_vars = _ecs_vars_subset(extension, ext_manifest)
 
     launcher_vars = _launcher_vars_for_stage(launcher_state, "production")
+    _apply_websocket_to_vars(launcher_vars, launcher_resources, "production")
     handler_vars = _platform_vars_for_handlers(launcher_vars)
 
     vars_payload: dict[str, str] = {**ecs_vars, **handler_vars}
+    for key in ("WEBSOCKET_CONNECTIONS", "WEBSOCKET_URL", "VITE_WEBSOCKET_URL"):
+        if launcher_vars.get(key):
+            vars_payload[key] = launcher_vars[key]
 
     function_name: str = (
         (ext_manifest.get("lambda") or {}).get("function_name")
@@ -268,9 +331,15 @@ def _write_deploy_input(
     ext_manifest: dict[str, Any],
     handlers_oidc: dict[str, Any] | None,
     tenant: str | None,
+    launcher_resources: dict[str, Any] | None = None,
 ) -> None:
     payload = _deploy_input_payload(
-        launcher_state, ext_manifest, extension, handlers_oidc, tenant
+        launcher_state,
+        ext_manifest,
+        extension,
+        handlers_oidc,
+        tenant,
+        launcher_resources,
     )
     (platform_state / "deploy_input.json").write_text(
         json.dumps(payload, indent=2) + "\n",
@@ -326,9 +395,19 @@ def _build_platform_vars_payload(
     launcher_env_json: dict[str, Any],
     ext_manifest: dict[str, Any],
     tenant: str | None,
+    launcher_resources: dict[str, Any] | None = None,
+    stage_name: str | None = None,
 ) -> dict[str, Any]:
     """Merge one launcher environment JSON (production or staging) with ECS from provision_manifest."""
     launcher_vars: dict[str, str] = dict(launcher_env_json.get("VARS") or {})
+    stage = stage_name or str(launcher_env_json.get("ENVIRONMENT") or "production").strip() or "production"
+    if stage.startswith("staging") or stage.endswith("_staging"):
+        stage_key = "staging"
+    elif stage == "production" or stage.endswith("_production"):
+        stage_key = "production"
+    else:
+        stage_key = stage
+    _apply_websocket_to_vars(launcher_vars, launcher_resources, stage_key)
     launcher_secrets: dict[str, str] = dict(launcher_env_json.get("SECRETS") or {})
 
     ecs = ext_manifest.get("ecs") or {}
@@ -374,34 +453,78 @@ def _write_all_platform_vars(
     launcher_state: Path,
     ext_manifest: dict[str, Any],
     tenant: str | None,
+    launcher_resources: dict[str, Any] | None = None,
 ) -> None:
     """Write platform_vars.<stage>.json for each launcher environment file present."""
-    pairs: list[tuple[str, str]] = [
-        ("production.json", "platform_vars.production.json"),
-        ("staging.json", "platform_vars.staging.json"),
+    pairs: list[tuple[str, str, str]] = [
+        ("production.json", "platform_vars.production.json", "production"),
+        ("staging.json", "platform_vars.staging.json", "staging"),
     ]
-    for launcher_name, out_name in pairs:
+    for launcher_name, out_name, stage_key in pairs:
         launcher_json = _read_json(launcher_state / launcher_name)
         if not launcher_json:
             continue
-        payload = _build_platform_vars_payload(launcher_json, ext_manifest, tenant)
+        payload = _build_platform_vars_payload(
+            launcher_json,
+            ext_manifest,
+            tenant,
+            launcher_resources,
+            stage_key,
+        )
         (platform_state / out_name).write_text(
             json.dumps(payload, indent=2) + "\n",
             encoding="utf-8",
         )
 
 
+def _strip_websocket_lines_from_env_config(content: str) -> str:
+    """Remove WEBSOCKET_* / VITE_WEBSOCKET_* lines so merge can rewrite from created_resources."""
+    lines = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(
+            (
+                "WEBSOCKET_CONNECTIONS",
+                "WEBSOCKET_URL",
+                "VITE_WEBSOCKET_URL",
+            )
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines).rstrip()
+
+
+def _websocket_env_config_lines(launcher_resources: dict[str, Any]) -> list[str]:
+    """Production + staging websocket constants for bootstrap env_config.py."""
+    lines: list[str] = []
+    prod = _websocket_vars_from_backend_stage(launcher_resources, "production")
+    if prod:
+        lines.append("")
+        lines.append(f"WEBSOCKET_CONNECTIONS = {prod['WEBSOCKET_CONNECTIONS']!r}")
+        lines.append(f"WEBSOCKET_URL = {prod['WEBSOCKET_URL']!r}")
+        lines.append(f"VITE_WEBSOCKET_URL = {prod['VITE_WEBSOCKET_URL']!r}")
+    stg = _websocket_vars_from_backend_stage(launcher_resources, "staging")
+    if stg:
+        lines.append(f"WEBSOCKET_CONNECTIONS_STAGING = {stg['WEBSOCKET_CONNECTIONS']!r}")
+        lines.append(f"WEBSOCKET_URL_STAGING = {stg['WEBSOCKET_URL']!r}")
+        lines.append(f"VITE_WEBSOCKET_URL_STAGING = {stg['VITE_WEBSOCKET_URL']!r}")
+    return lines
+
+
 def _write_env_config(
     platform_state: Path,
     launcher_env_config: Path,
     ext_manifest: dict[str, Any],
+    launcher_resources: dict[str, Any] | None = None,
 ) -> Path:
-    """Write env_config.py with launcher base + ECS constants appended."""
+    """Write env_config.py with launcher base + websocket (from created_resources) + ECS appended."""
     out_path = platform_state / "env_config.py"
 
     base_content = ""
     if launcher_env_config.is_file():
-        base_content = launcher_env_config.read_text(encoding="utf-8").rstrip()
+        base_content = _strip_websocket_lines_from_env_config(
+            launcher_env_config.read_text(encoding="utf-8")
+        )
 
     ecs = ext_manifest.get("ecs") or {}
     buckets = ext_manifest.get("buckets") or {}
@@ -434,6 +557,11 @@ def _write_env_config(
     if handlers_arn:
         ecs_lines.append(f"LAMBDA_EXTERNAL_HANDLERS_ARN = {repr(handlers_arn)}")
 
-    content = base_content + "\n".join(ecs_lines) + "\n"
+    ws_lines: list[str] = []
+    if launcher_resources:
+        ws_lines = _websocket_env_config_lines(launcher_resources)
+
+    parts = [p for p in (base_content, "\n".join(ws_lines), "\n".join(ecs_lines)) if p]
+    content = "\n".join(parts) + "\n"
     out_path.write_text(content, encoding="utf-8")
     return out_path

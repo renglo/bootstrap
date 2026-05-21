@@ -81,7 +81,7 @@ Both modes are **idempotent**: re-running updates IAM and (if `--launch-type` is
 | `--merge-only` | No AWS changes; re-merge existing `launcher/state` + `extensions-service/state` into `bootstrap/state` |
 | `--tenant <tenant_name>` | Prefix `ENVIRONMENT` in `platform_vars.*` only (`tenant_name_production`, `tenant_name_staging`) |
 
-**Non-default VPC:** run extensions standalone with `--vpc vpc-...` — see [extensions-service/README.md](../extensions-service/README.md).
+**Non-default VPC:** run extensions standalone with `--vpc vpc-...` 
 
 ---
 
@@ -136,8 +136,3 @@ find . -name "*.sh" -exec sed -i 's/\r$//' {} \;
 
 ---
 
-## More detail
-
-- Full layout, JSON shapes, and design: [ARCHITECTURE.md](ARCHITECTURE.md)
-- Launcher-only deploy: [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)
-- Extensions-only: [extensions-service/README.md](../extensions-service/README.md)
