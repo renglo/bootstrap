@@ -146,8 +146,8 @@ def _remove_stale_alias_files(platform_state: Path) -> None:
 
 def _normalize_websocket_urls(connections_url: str, websocket_url: str) -> dict[str, str]:
     """
-    Canonical WEBSOCKET_* vars for JSON / Lambda env.
-    WEBSOCKET_CONNECTIONS = https management API base; WEBSOCKET_URL / VITE_WEBSOCKET_URL = wss.
+    Canonical WEBSOCKET_* vars for JSON / Lambda env (no VITE_* — frontend uses separate config).
+    WEBSOCKET_CONNECTIONS = https management API base; WEBSOCKET_URL = wss client URL.
     """
     c = (connections_url or "").strip().rstrip("/")
     w = (websocket_url or "").strip().rstrip("/")
@@ -163,7 +163,6 @@ def _normalize_websocket_urls(connections_url: str, websocket_url: str) -> dict[
         out["WEBSOCKET_CONNECTIONS"] = c
     if w:
         out["WEBSOCKET_URL"] = w
-        out["VITE_WEBSOCKET_URL"] = w
     return out
 
 
@@ -204,7 +203,16 @@ def _launcher_vars_for_stage(launcher_state: Path, stage: str) -> dict[str, str]
         str(key): str(value)
         for key, value in raw.items()
         if value is not None and str(value).strip() != ""
+        and not str(key).startswith("VITE_")
     }
+
+
+def _ensure_aws_region_pair(vars_map: dict[str, str]) -> None:
+    region = (vars_map.get("AWS_REGION") or vars_map.get("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        return
+    vars_map["AWS_REGION"] = region
+    vars_map["AWS_DEFAULT_REGION"] = region
 
 
 def _platform_vars_for_handlers(launcher_vars: dict[str, str]) -> dict[str, str]:
@@ -287,7 +295,7 @@ def _deploy_input_payload(
     handler_vars = _platform_vars_for_handlers(launcher_vars)
 
     vars_payload: dict[str, str] = {**ecs_vars, **handler_vars}
-    for key in ("WEBSOCKET_CONNECTIONS", "WEBSOCKET_URL", "VITE_WEBSOCKET_URL"):
+    for key in ("WEBSOCKET_CONNECTIONS", "WEBSOCKET_URL"):
         if launcher_vars.get(key):
             vars_payload[key] = launcher_vars[key]
 
@@ -300,6 +308,8 @@ def _deploy_input_payload(
     ecr_image_uri: str = str((ext_manifest.get("ecr") or {}).get("image_uri") or "")
     if ecr_image_uri:
         vars_payload["ECR_IMAGE_URI"] = ecr_image_uri
+
+    _ensure_aws_region_pair(vars_payload)
 
     secrets: dict[str, str] = {}
     if handlers_oidc and handlers_oidc.get("role_arn_production"):
@@ -408,6 +418,9 @@ def _build_platform_vars_payload(
     else:
         stage_key = stage
     _apply_websocket_to_vars(launcher_vars, launcher_resources, stage_key)
+    for vite_key in list(launcher_vars):
+        if vite_key.startswith("VITE_"):
+            launcher_vars.pop(vite_key, None)
     launcher_secrets: dict[str, str] = dict(launcher_env_json.get("SECRETS") or {})
 
     ecs = ext_manifest.get("ecs") or {}
@@ -433,6 +446,8 @@ def _build_platform_vars_payload(
     handlers_arn = handlers_lambda.get("LAMBDA_EXTERNAL_HANDLERS_ARN")
     if handlers_arn:
         launcher_vars["LAMBDA_EXTERNAL_HANDLERS_ARN"] = str(handlers_arn)
+
+    _ensure_aws_region_pair(launcher_vars)
 
     env_label = str(launcher_env_json.get("ENVIRONMENT") or "").strip() or "production"
 
@@ -502,7 +517,7 @@ def _websocket_env_config_lines(launcher_resources: dict[str, Any]) -> list[str]
         lines.append("")
         lines.append(f"WEBSOCKET_CONNECTIONS = {prod['WEBSOCKET_CONNECTIONS']!r}")
         lines.append(f"WEBSOCKET_URL = {prod['WEBSOCKET_URL']!r}")
-        lines.append(f"VITE_WEBSOCKET_URL = {prod['VITE_WEBSOCKET_URL']!r}")
+        lines.append(f"VITE_WEBSOCKET_URL = {prod['WEBSOCKET_URL']!r}")
     stg = _websocket_vars_from_backend_stage(launcher_resources, "staging")
     if stg:
         lines.append(f"WEBSOCKET_CONNECTIONS_STAGING = {stg['WEBSOCKET_CONNECTIONS']!r}")

@@ -183,7 +183,7 @@ Handlers **stage 2** deploy and GitHub Environment (same envelope as `platform_v
 }
 ```
 
-Deploy merges `VARS` + `SECRETS` into Lambda/ECS runtime except `RUNTIME_ENV_EXCLUDE` (e.g. `AWS_GITHUB_OIDC_ROLE_ARN` for CI only). Lambda create/update metadata is fixed in `extensions-service/deploy_input.py` (including `Description`: `Reglo Deployment`); `FunctionName` comes from `VARS.LAMBDA_HANDLERS_FUNCTION_NAME`. Provision scripts tag IAM/S3/ECR/ECS/CloudWatch resources with the same label where AWS supports it.
+Deploy merges `VARS` + `SECRETS` into Lambda/ECS runtime except `RUNTIME_ENV_EXCLUDE` (e.g. `AWS_GITHUB_OIDC_ROLE_ARN` for CI only). `VARS` include both `AWS_REGION` and `AWS_DEFAULT_REGION` (same value); ECS task env keeps both; Lambda deploy omits them from `Environment.Variables` (AWS reserved). Lambda create/update metadata is fixed in `extensions-service/deploy_input.py` (including `Description`: `Reglo Deployment`); `FunctionName` comes from `VARS.LAMBDA_HANDLERS_FUNCTION_NAME`. Provision scripts tag IAM/S3/ECR/ECS/CloudWatch resources with the same label where AWS supports it.
 
 Schema: `extensions-service/state/schemas/deploy_input.schema.json`
 
