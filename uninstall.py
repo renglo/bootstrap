@@ -10,13 +10,14 @@ Usage:
     python bootstrap/uninstall.py <extension> \\
         --profile acd-arbitium-tt-dev \\
         [--yes] \\
+        [--extension-specific <folder>] \\
         [--skip-extensions] \\
         [--skip-launcher] \\
         [--skip-tables] \\
         [--skip-cognito] \\
-        [--keep-logs]
-
+        [--keep-logs] \\
 Teardown order:
+  0. extension-specific: <folder>/installer/infra/teardown_extension.sh  (if --extension-specific)
   1. extensions-service: python run.py <ext> provision-infra teardown --profile ... --yes [--keep-logs]
   2. launcher:           python scripts/teardown_environment.py <ext> --aws-profile ... --yes [--skip-*] [--keep-logs]
 """
@@ -79,6 +80,30 @@ def _run_subprocess(cmd: list[str], cwd: Path, description: str) -> int:
     print(f"{'=' * 60}")
     result = subprocess.run(cmd, cwd=str(cwd))
     return result.returncode
+
+
+def _run_extension_teardown(
+    ext_folder: Path,
+    env_name: str,
+    profile: str,
+    aws_region: str,
+) -> int:
+    """Run teardown_extension.sh from <ext_folder>/installer/infra/ if present.
+
+    Must run BEFORE extensions-service and launcher teardowns so that policy
+    detaches happen while the roles still exist.
+    Returns the exit code (0 = success; non-zero = failure).
+    """
+    script = ext_folder / "installer" / "infra" / "teardown_extension.sh"
+    if not script.is_file():
+        print(f"\n[extension-specific] teardown_extension.sh not found at {script} — skipping")
+        return 0
+    cmd = ["bash", str(script), env_name, "--aws-profile", profile, "--aws-region", aws_region]
+    return _run_subprocess(
+        cmd,
+        cwd=ext_folder / "installer" / "infra",
+        description=f"Extension-specific teardown: {ext_folder.name}",
+    )
 
 
 def _read_platform_resources(extension: str) -> dict:
@@ -173,7 +198,7 @@ def main() -> None:
     )
     parser.add_argument(
         "extension",
-        help="Extension / environment name to tear down (e.g. arbitiumrs)",
+        help="Platform environment name to tear down (same as install.py argument)",
     )
     parser.add_argument(
         "--profile",
@@ -215,6 +240,15 @@ def main() -> None:
         action="store_true",
         help="Preserve CloudWatch log groups in both extensions-service and launcher teardowns",
     )
+    parser.add_argument(
+        "--extension-specific",
+        default=None,
+        metavar="FOLDER",
+        help=(
+            "Extension repo folder under workspace (path name only). "
+            "Runs <folder>/installer/infra/teardown_extension.sh before extensions-service and launcher teardown."
+        ),
+    )
     args = parser.parse_args()
 
     platform_resources = _read_platform_resources(args.extension)
@@ -226,9 +260,18 @@ def main() -> None:
         skip_cognito=args.skip_cognito,
     )
 
+    ext_folder: Path | None = None
+    if args.extension_specific:
+        ext_folder = _WORKSPACE_ROOT / args.extension_specific
+        if not ext_folder.is_dir():
+            print(f"\nERROR: --extension-specific folder not found: {ext_folder}", file=sys.stderr)
+            sys.exit(1)
+
     print(f"\nPlatform uninstaller — extension: {args.extension}")
     print(f"  AWS profile : {args.profile}")
     print(f"  AWS region  : {aws_region}")
+    if ext_folder:
+        print(f"  Extension   : {args.extension_specific}")
     if args.skip_tables:
         print("  DynamoDB tables : preserved (--skip-tables, launcher)")
     if args.skip_cognito:
@@ -244,6 +287,18 @@ def main() -> None:
             return
 
     errors: list[str] = []
+
+    # Step 0: extension-specific teardown (before roles are deleted by launcher)
+    if ext_folder is not None:
+        rc = _run_extension_teardown(
+            ext_folder=ext_folder,
+            env_name=args.extension,
+            profile=args.profile,
+            aws_region=aws_region,
+        )
+        if rc != 0:
+            errors.append(f"extension-specific teardown exited with code {rc}")
+            print(f"\nWarning: extension teardown failed (code {rc}). Continuing...")
 
     # Step 1: extensions-service teardown
     if not args.skip_extensions:

@@ -14,11 +14,24 @@ Local machine must have:
 - GitHub API (Optional - only renglo DevOps)
 - WSL (only for windows)
 
-Also, configure a DevOps-capable AWS CLI profile.
+- Configure a DevOps-capable AWS CLI profile.
 
-- **Minimal IAM policy for scripts that provision an environment:** run  
-  `python bootstrap/helpers/generate_env_deployment_tt_policy.py <env> --aws-profile <profile>`  
-  (writes `bootstrap/state/<env>/<env>_deployment_tt_policy.json` by default.)
+**IAM for operators** (launcher + extensions-service install and full teardown). Two JSON files are generated; attach both to the operator user/group (or use the provision helper below).
+
+```bash
+python bootstrap/helpers/generate_env_deployment_tt_policy.py <extension> \
+  --aws-profile <aws-profile> or --account-id <id> \
+  --aws-region us-east-1
+```
+
+Optional: create user, group, role, and attach both policies in AWS (sysadmin profile):
+
+```bash
+python bootstrap/helpers/provision_env_deployment_tt_identity.py <extension> \
+  --aws-profile <aws-profile> \
+  --aws-region us-east-1 \
+  --create-access-key
+```
 
 Clone **bootstrap** into a <infra-launcher> folder, alongside extensions-service and **launcher**
 ```bash
@@ -26,6 +39,12 @@ cd <infra-launcher>
 git clone https://github.com/renglo/bootstrap.git
 git clone https://github.com/renglo/launcher.git
 git clone https://github.com/renglo/extensions-service.git
+```
+
+You can also clone additional extensions if they contain either `<extension_folder>/installer/infra/provision_extension.sh` or `<extension_folder>/installer/infra/ecs_profile.json`.
+
+```bash
+git clone https://github.com/<org>/<repo>.git
 ```
 
 ---
@@ -67,6 +86,17 @@ python bootstrap/install.py <extension> \
   --launch-type ec2
 ```
 
+### With extension repo 
+
+```bash
+python bootstrap/install.py <extension> \
+  --profile <aws-profile> \
+  --aws-region us-east-1 \
+  --github-repo Org/repo \
+  --extension-specific <extension_folder> \
+  --launch-type ec2
+```
+
 Both modes are **idempotent**: re-running updates IAM and (if `--launch-type` is given) ECS infra without destroying existing resources. Running without `--launch-type` on an environment that already has ECS preserves the ECS manifest sections.
 
 **Optional:**
@@ -80,6 +110,7 @@ Both modes are **idempotent**: re-running updates IAM and (if `--launch-type` is
 | `--skip-extensions` | Only launcher + merge |
 | `--merge-only` | No AWS changes; re-merge existing `launcher/state` + `extensions-service/state` into `bootstrap/state` |
 | `--tenant <tenant_name>` | Prefix `ENVIRONMENT` in `platform_vars.*` only (`tenant_name_production`, `tenant_name_staging`) |
+| `--dry-run` | Skip launcher/extensions AWS provisioning; still merge state. |
 
 **Non-default VPC:** run extensions standalone with `--vpc vpc-...` 
 
@@ -94,6 +125,8 @@ python bootstrap/uninstall.py <extension> \
   --profile <aws-profile> \
   --yes
 ```
+
+**Note:**DevOps profile and policies should be deleted manually in AWS console or with CLI.
 
 **Optional:**
 

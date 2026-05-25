@@ -62,6 +62,7 @@ def merge_manifests(
     platform_installer_root: Path,
     aws_region: str,
     tenant: str | None = None,
+    extension_extra_resources: Path | None = None,
 ) -> Path:
     """Merge launcher + extensions-service outputs into platform-installer state.
 
@@ -80,8 +81,14 @@ def merge_manifests(
     ext_manifest = _read_json(ext_state / "provision_manifest.json") or {}
     handlers_oidc = _read_json(ext_state / "handlers_github_oidc.json")
 
-    _write_platform_resources(platform_state, extension, aws_region, launcher_resources, ext_manifest, handlers_oidc)
-    _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant, launcher_resources)
+    ext_extra: dict[str, Any] = {}
+    if extension_extra_resources:
+        ext_extra = _read_json(extension_extra_resources) or {}
+        if ext_extra:
+            print(f"  Merging extension-specific resources: {extension_extra_resources}")
+
+    _write_platform_resources(platform_state, extension, aws_region, launcher_resources, ext_manifest, handlers_oidc, ext_extra)
+    _write_all_platform_vars(platform_state, launcher_state, ext_manifest, tenant, launcher_resources, ext_extra)
     _write_deploy_input(
         platform_state,
         launcher_state,
@@ -90,6 +97,7 @@ def merge_manifests(
         handlers_oidc,
         tenant,
         launcher_resources,
+        ext_extra,
     )
     _write_env_config(
         platform_state,
@@ -282,6 +290,7 @@ def _deploy_input_payload(
     handlers_oidc: dict[str, Any] | None,
     tenant: str | None,
     launcher_resources: dict[str, Any] | None = None,
+    ext_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build deploy_input.json for extensions-service stage 2 and handlers GitHub Environment.
 
@@ -309,6 +318,11 @@ def _deploy_input_payload(
     if ecr_image_uri:
         vars_payload["ECR_IMAGE_URI"] = ecr_image_uri
 
+    if ext_extra:
+        for k, v in (ext_extra.get("vars") or {}).items():
+            if v is not None and str(v).strip():
+                vars_payload[str(k)] = str(v)
+
     _ensure_aws_region_pair(vars_payload)
 
     secrets: dict[str, str] = {}
@@ -318,6 +332,11 @@ def _deploy_input_payload(
     launcher_secrets = _launcher_secrets_for_stage(launcher_state, "production")
     launcher_secrets.pop("AWS_GITHUB_OIDC_ROLE_ARN", None)
     secrets.update(launcher_secrets)
+
+    if ext_extra:
+        for k, v in (ext_extra.get("secrets") or {}).items():
+            if v is not None and str(v).strip():
+                secrets[str(k)] = str(v)
 
     gh_repo = ""
     if handlers_oidc:
@@ -342,6 +361,7 @@ def _write_deploy_input(
     handlers_oidc: dict[str, Any] | None,
     tenant: str | None,
     launcher_resources: dict[str, Any] | None = None,
+    ext_extra: dict[str, Any] | None = None,
 ) -> None:
     payload = _deploy_input_payload(
         launcher_state,
@@ -350,6 +370,7 @@ def _write_deploy_input(
         handlers_oidc,
         tenant,
         launcher_resources,
+        ext_extra,
     )
     (platform_state / "deploy_input.json").write_text(
         json.dumps(payload, indent=2) + "\n",
@@ -363,7 +384,8 @@ def _write_platform_resources(
     aws_region: str,
     launcher_resources: dict[str, Any],
     ext_manifest: dict[str, Any],
-    handlers_oidc: dict[str, Any] | None,
+    handlers_oidc: dict[str, Any],
+    ext_extra: dict[str, Any] 
 ) -> Path:
     """Write combined resource inventory as structured JSON."""
     out_path = platform_state / "platform_resources.json"
@@ -396,6 +418,11 @@ def _write_platform_resources(
             "github_oidc": _handlers_github_oidc_block(handlers_oidc),
         },
     }
+    if ext_extra:
+        payload["extension_specific"] = {
+            "s3": ext_extra.get("s3", {}),
+            "iam": ext_extra.get("iam", {}),
+        }
 
     out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return out_path
@@ -407,6 +434,7 @@ def _build_platform_vars_payload(
     tenant: str | None,
     launcher_resources: dict[str, Any] | None = None,
     stage_name: str | None = None,
+    ext_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge one launcher environment JSON (production or staging) with ECS from provision_manifest."""
     launcher_vars: dict[str, str] = dict(launcher_env_json.get("VARS") or {})
@@ -447,6 +475,14 @@ def _build_platform_vars_payload(
     if handlers_arn:
         launcher_vars["LAMBDA_EXTERNAL_HANDLERS_ARN"] = str(handlers_arn)
 
+    if ext_extra:
+        for k, v in (ext_extra.get("vars") or {}).items():
+            if v is not None and str(v).strip():
+                launcher_vars[str(k)] = str(v)
+        for k, v in (ext_extra.get("secrets") or {}).items():
+            if v is not None and str(v).strip() and k not in {"OPENAI_API_KEY"}:
+                launcher_secrets[str(k)] = str(v)
+
     _ensure_aws_region_pair(launcher_vars)
 
     env_label = str(launcher_env_json.get("ENVIRONMENT") or "").strip() or "production"
@@ -469,7 +505,8 @@ def _write_all_platform_vars(
     ext_manifest: dict[str, Any],
     tenant: str | None,
     launcher_resources: dict[str, Any] | None = None,
-) -> None:
+    ext_extra: dict[str, Any] | None = None,
+):
     """Write platform_vars.<stage>.json for each launcher environment file present."""
     pairs: list[tuple[str, str, str]] = [
         ("production.json", "platform_vars.production.json", "production"),
@@ -485,6 +522,7 @@ def _write_all_platform_vars(
             tenant,
             launcher_resources,
             stage_key,
+            ext_extra,
         )
         (platform_state / out_name).write_text(
             json.dumps(payload, indent=2) + "\n",
@@ -492,7 +530,7 @@ def _write_all_platform_vars(
         )
 
 
-def _strip_websocket_lines_from_env_config(content: str) -> str:
+def _strip_websocket_lines_from_env_config(content) -> str:
     """Remove WEBSOCKET_* / VITE_WEBSOCKET_* lines so merge can rewrite from created_resources."""
     lines = []
     for line in content.splitlines():
@@ -522,7 +560,7 @@ def _websocket_env_config_lines(launcher_resources: dict[str, Any]) -> list[str]
     if stg:
         lines.append(f"WEBSOCKET_CONNECTIONS_STAGING = {stg['WEBSOCKET_CONNECTIONS']!r}")
         lines.append(f"WEBSOCKET_URL_STAGING = {stg['WEBSOCKET_URL']!r}")
-        lines.append(f"VITE_WEBSOCKET_URL_STAGING = {stg['VITE_WEBSOCKET_URL']!r}")
+        lines.append(f"VITE_WEBSOCKET_URL_STAGING = {stg['WEBSOCKET_URL']!r}")
     return lines
 
 

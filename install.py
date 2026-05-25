@@ -32,6 +32,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -100,6 +101,74 @@ def _run_subprocess(cmd: list[str], cwd: Path, description: str) -> None:
         sys.exit(result.returncode)
 
 
+def _read_ecs_profile(ext_folder: Path) -> dict:
+    """Read ecs_profile.json from <ext_folder>/installer/infra/ if it exists."""
+    profile_file = ext_folder / "installer" / "infra" / "ecs_profile.json"
+    if not profile_file.is_file():
+        return {}
+    with open(profile_file, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _seed_runtime_profile(
+    ext_folder: Path,
+    extension: str,
+    extensions_service_root: Path,
+) -> None:
+    """Seed extensions-service/state/<ext>/runtime_profile.json from ecs_profile.json.
+
+    Only written when the file does not yet exist (first-time default).
+    Subsequent runs preserve whatever extensions-service last saved.
+    """
+    ecs_profile_file = ext_folder / "installer" / "infra" / "ecs_profile.json"
+    if not ecs_profile_file.is_file():
+        return
+
+    runtime_profile_path = extensions_service_root / "state" / extension / "runtime_profile.json"
+    if runtime_profile_path.is_file():
+        return  # Already seeded; extensions-service manages updates from here
+
+    from datetime import datetime, timezone
+    data = json.loads(ecs_profile_file.read_text(encoding="utf-8"))
+    profile = {
+        "state_version": 1,
+        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+    profile.update(data)
+    runtime_profile_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(runtime_profile_path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+        f.write("\n")
+    print(f"\n[extension-specific] Seeded runtime profile → {runtime_profile_path}")
+
+
+def _run_extension_specific(
+    ext_folder: Path,
+    env_name: str,
+    profile: str,
+    aws_region: str,
+    dry_run: bool,
+) -> Path | None:
+    """Run provision_extension.sh from <ext_folder>/installer/infra/ if present.
+
+    Returns the path to extra_resources.json if it was written, else None.
+    """
+    script = ext_folder / "installer" / "infra" / "provision_extension.sh"
+    if not script.is_file():
+        print(f"\n[extension-specific] provision_extension.sh not found at {script} — skipping")
+        return None
+    cmd = ["bash", str(script), env_name, "--aws-profile", profile, "--aws-region", aws_region]
+    if dry_run:
+        cmd.append("--dry-run")
+    _run_subprocess(
+        cmd,
+        cwd=ext_folder / "installer" / "infra",
+        description=f"Extension-specific provision: {ext_folder.name}",
+    )
+    extra_resources = ext_folder / "installer" / "infra" / "extra_resources.json"
+    return extra_resources if extra_resources.is_file() else None
+
+
 def _run_launcher(extension: str, profile: str, aws_region: str, github_repo: str) -> None:
     launcher_scripts = _WORKSPACE_ROOT / "launcher" / "scripts"
     _run_subprocess(
@@ -154,12 +223,12 @@ def main() -> None:
     )
     parser.add_argument(
         "extension",
-        help="Extension / environment name (e.g. arbitiumrs)",
+        help="Platform environment name (launcher + extensions prefix, e.g. myenv)",
     )
     parser.add_argument(
         "--profile",
         required=True,
-        help="AWS named profile with sufficient rights (e.g. acd-arbitium-tt-dev)",
+        help="AWS named profile with sufficient rights",
     )
     parser.add_argument(
         "--aws-region",
@@ -210,6 +279,25 @@ def main() -> None:
             "(e.g. acme → ENVIRONMENT acme_production). Does not change launcher or extensions-service."
         ),
     )
+    parser.add_argument(
+        "--extension-specific",
+        default=None,
+        metavar="FOLDER",
+        help=(
+            "Extension repo folder under workspace (path name only, not the platform env). "
+            "Runs <folder>/installer/infra/provision_extension.sh if present; "
+            "reads <folder>/installer/infra/ecs_profile.json for default ECS settings when --launch-type is omitted."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Skip AWS provisioning for launcher and extensions-service. "
+            "If --extension-specific is set, runs provision_extension.sh in dry-run mode. "
+            "Merges existing state manifests into platform state."
+        ),
+    )
     args = parser.parse_args()
 
     print(f"\nPlatform installer — extension: {args.extension}")
@@ -218,11 +306,34 @@ def main() -> None:
     handlers_repo = args.handlers_github_repo or args.github_repo
     print(f"  GitHub repo (release/OIDC) : {args.github_repo}")
     print(f"  GitHub repo (handlers) : {handlers_repo}")
-    print(f"  Launch type : {args.launch_type or 'lambda-only (no ECS)'}")
+    if args.dry_run:
+        print("  Mode        : DRY-RUN")
     if args.tenant:
         print(f"  Tenant      : {args.tenant.strip()} (GitHub ENVIRONMENT → {args.tenant.strip()}_<stage>)")
 
-    if not args.merge_only:
+    # Resolve ECS launch type: explicit CLI flag > ecs_profile.json > None (lambda-only)
+    launch_type = args.launch_type
+    ext_folder: Path | None = None
+    extra_resources_path: Path | None = None
+
+    if args.extension_specific:
+        ext_folder = _WORKSPACE_ROOT / args.extension_specific
+        if not ext_folder.is_dir():
+            print(f"\nERROR: --extension-specific folder not found: {ext_folder}", file=sys.stderr)
+            sys.exit(1)
+        if launch_type is None:
+            ecs_profile = _read_ecs_profile(ext_folder)
+            if ecs_profile.get("launch_type"):
+                launch_type = ecs_profile["launch_type"]
+                print(
+                    f"  ECS launch type : {launch_type} "
+                    f"(from {args.extension_specific}/installer/infra/ecs_profile.json)"
+                )
+
+    print(f"  Launch type : {launch_type or 'lambda-only (no ECS)'}")
+
+    skip_provisioning = args.merge_only or args.dry_run
+    if not skip_provisioning:
         if not args.skip_launcher:
             _run_launcher(
                 extension=args.extension,
@@ -233,18 +344,41 @@ def main() -> None:
         else:
             print("\n[launcher] SKIPPED (--skip-launcher)")
 
+        # Seed runtime_profile.json from ecs_profile.json before extensions-service runs,
+        # so provision_ecs_capacity.sh picks up the extension's declared capacity settings.
+        if ext_folder is not None and not args.skip_extensions:
+            _seed_runtime_profile(ext_folder, args.extension, _WORKSPACE_ROOT / "extensions-service")
+
         if not args.skip_extensions:
             _run_extensions_service(
                 extension=args.extension,
                 profile=args.profile,
-                launch_type=args.launch_type,
+                launch_type=launch_type,
                 handlers_github_repo=handlers_repo,
                 handlers_enable_staging_role=args.handlers_enable_staging_role,
             )
         else:
             print("\n[extensions-service] SKIPPED (--skip-extensions)")
     else:
-        print("\n[provisioning] SKIPPED (--merge-only)")
+        reason = "--merge-only" if args.merge_only else "--dry-run"
+        print(f"\n[provisioning] SKIPPED ({reason})")
+
+    # Extension-specific provisioning (runs even in dry-run, passing --dry-run through)
+    if ext_folder is not None and not args.merge_only:
+        extra_resources_path = _run_extension_specific(
+            ext_folder=ext_folder,
+            env_name=args.extension,
+            profile=args.profile,
+            aws_region=args.aws_region,
+            dry_run=args.dry_run,
+        )
+
+    # If merge-only or provision was skipped, try to locate an existing extra_resources.json
+    if extra_resources_path is None and ext_folder is not None:
+        er = ext_folder / "installer" / "infra" / "extra_resources.json"
+        if er.is_file():
+            extra_resources_path = er
+            print(f"\n[extension-specific] Using existing extra_resources.json: {er}")
 
     # Merge manifests into platform state
     from lib.merger import merge_manifests
@@ -256,6 +390,7 @@ def main() -> None:
         platform_installer_root=_PLATFORM_INSTALLER_ROOT,
         aws_region=args.aws_region,
         tenant=args.tenant,
+        extension_extra_resources=extra_resources_path,
     )
 
     print(f"\nInstallation complete for extension: {args.extension}")

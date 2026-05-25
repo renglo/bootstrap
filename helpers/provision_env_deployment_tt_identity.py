@@ -3,13 +3,14 @@
 Create IAM identity for deploy_environment.py operators (sysadmin profile).
 
 Idempotent: skips or merges when user, group, role, or policy already exists.
-Builds the same policy document as generate_env_deployment_tt_policy (inline via
-import), including scoped permissions for backend bootstrap resources (ECR/APIGateway/Lambda),
-optionally extended with sts:AssumeRole on <env>_deployment_tt_role.
+
+Two customer-managed policies are created and attached to the user/group/role:
+  - <env>_deployment_tt_policy      — launcher resources
+  - <env>_deployment_ext_policy     — extensions-service resources (ECS, EC2, ASG…)
 
 Typical usage (from repo root or any cwd; use paths relative to cwd if overriding outputs):
   python bootstrap/helpers/provision_env_deployment_tt_identity.py myenv \\
-    --aws-profile sysadmin --aws-region us-east-1 --create-access-key
+    --aws-profile <profile> --aws-region us-east-1 --create-access-key
 
 Use flag --custom-username to create more users.
 """
@@ -35,7 +36,13 @@ if str(_HELPERS) not in sys.path:
 
 from botocore.exceptions import ClientError
 
-from generate_env_deployment_tt_policy import _policy_document, _resolve_account_id
+from generate_env_deployment_tt_policy import (
+    IAM_MANAGED_POLICY_MAX_CHARS,
+    _extensions_policy_document,
+    _policy_document,
+    _policy_document_size,
+    _resolve_account_id,
+)
 
 _BOOTSTRAP_ROOT = _HELPERS.parent
 
@@ -103,18 +110,68 @@ def _merge_user_into_trust_policy(
     return json.dumps(doc)
 
 
+def _policy_documents_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return json.dumps(a, sort_keys=True, separators=(",", ":")) == json.dumps(
+        b, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _get_default_policy_document(iam, policy_arn: str) -> dict[str, Any]:
+    meta = iam.get_policy(PolicyArn=policy_arn)["Policy"]
+    raw = iam.get_policy_version(
+        PolicyArn=policy_arn,
+        VersionId=meta["DefaultVersionId"],
+    )["PolicyVersion"]["Document"]
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return dict(raw)
+
+
+def _update_customer_managed_policy(iam, policy_arn: str, doc_str: str) -> None:
+    versions = iam.list_policy_versions(PolicyArn=policy_arn).get("Versions", [])
+    if len(versions) >= 5:
+        for v in sorted(versions, key=lambda x: x["CreateDate"]):
+            if not v["IsDefaultVersion"]:
+                iam.delete_policy_version(PolicyArn=policy_arn, VersionId=v["VersionId"])
+                break
+
+    iam.create_policy_version(
+        PolicyArn=policy_arn,
+        PolicyDocument=doc_str,
+        SetAsDefault=True,
+    )
+    print(f"Updated policy document: {policy_arn}")
+    time.sleep(IAM_CREATE_PROPAGATION_SLEEP_SEC)
+
+
 def _ensure_customer_managed_policy(
     iam,
     account_id: str,
     policy_name: str,
     policy_document: dict[str, Any],
+    *,
+    update: bool = False,
 ) -> tuple[str, bool]:
     policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
-    doc_str = json.dumps(policy_document)
+    doc_str = json.dumps(policy_document, separators=(",", ":"))
+    doc_size = len(doc_str)
+    if doc_size > IAM_MANAGED_POLICY_MAX_CHARS:
+        raise SystemExit(
+            f"Policy {policy_name} is {doc_size} characters (IAM limit "
+            f"{IAM_MANAGED_POLICY_MAX_CHARS}). Re-run generate_env_deployment_tt_policy.py "
+            "after updating the generator, or split into multiple policies."
+        )
 
     try:
         iam.get_policy(PolicyArn=policy_arn)
-        print(f"Policy exists: {policy_arn} (document not auto-updated)")
+        if update:
+            current = _get_default_policy_document(iam, policy_arn)
+            if _policy_documents_equal(current, policy_document):
+                print(f"Policy up to date: {policy_arn}")
+            else:
+                _update_customer_managed_policy(iam, policy_arn, doc_str)
+        else:
+            print(f"Policy exists: {policy_arn} (document not auto-updated; pass --update-policies)")
         return policy_arn, False
     except ClientError as e:
         if not _is_no_such_entity(e):
@@ -159,27 +216,27 @@ def _ensure_group(iam, group_name: str) -> bool:
         return True
 
 
-def _ensure_attach_user_policy(iam, user_name: str, policy_arn: str):
+def _ensure_attach_user_policy(iam, user_name: str, policy_arn: str) -> None:
     attached = iam.list_attached_user_policies(UserName=user_name)
     for p in attached.get("AttachedPolicies", []):
         if p.get("PolicyArn") == policy_arn:
-            print(f"Policy already attached to user {user_name}")
+            print(f"Policy already attached to user {user_name}: {policy_arn}")
             return
     iam.attach_user_policy(UserName=user_name, PolicyArn=policy_arn)
-    print(f"Attached policy to user: {user_name}")
+    print(f"Attached {policy_arn} to user: {user_name}")
 
 
-def _ensure_attach_group_policy(iam, group_name: str, policy_arn: str):
+def _ensure_attach_group_policy(iam, group_name: str, policy_arn: str) -> None:
     attached = iam.list_attached_group_policies(GroupName=group_name)
     for p in attached.get("AttachedPolicies", []):
         if p.get("PolicyArn") == policy_arn:
-            print(f"Policy already attached to group {group_name}")
+            print(f"Policy already attached to group {group_name}: {policy_arn}")
             return
     iam.attach_group_policy(GroupName=group_name, PolicyArn=policy_arn)
-    print(f"Attached policy to group: {group_name}")
+    print(f"Attached {policy_arn} to group: {group_name}")
 
 
-def _ensure_user_in_group(iam, user_name: str, group_name: str):
+def _ensure_user_in_group(iam, user_name: str, group_name: str) -> None:
     resp = iam.list_groups_for_user(UserName=user_name)
     for g in resp.get("Groups", []):
         if g.get("GroupName") == group_name:
@@ -198,8 +255,9 @@ def _ensure_deployment_role(
     account_id: str,
     role_name: str,
     user_name: str,
-    policy_arn: str,
+    policy_arns: list[str],
 ) -> str:
+    """Create (or update) the deployment role and attach all supplied policy ARNs."""
     role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
     trust = _merge_user_into_trust_policy({}, account_id, user_name)
 
@@ -236,17 +294,21 @@ def _ensure_deployment_role(
                     continue
                 raise
 
-    attached = iam.list_attached_role_policies(RoleName=role_name)
-    for p in attached.get("AttachedPolicies", []):
-        if p.get("PolicyArn") == policy_arn:
-            print(f"Policy already attached to role {role_name}")
-            return role_arn
-    iam.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
-    print(f"Attached policy to role: {role_name}")
+    attached = {
+        p.get("PolicyArn")
+        for p in iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", [])
+    }
+    for arn in policy_arns:
+        if arn in attached:
+            print(f"Policy already attached to role {role_name}: {arn}")
+        else:
+            iam.attach_role_policy(RoleName=role_name, PolicyArn=arn)
+            print(f"Attached {arn} to role: {role_name}")
+
     return role_arn
 
 
-def _save_access_key_to_file(path: Path, user_name: str, key: dict[str, Any]):
+def _save_access_key_to_file(path: Path, user_name: str, key: dict[str, Any]) -> None:
     """Append one access key record to JSON; chmod 0600 on Unix."""
     ak = key["AccessKeyId"]
     sk = key["SecretAccessKey"]
@@ -293,7 +355,7 @@ def _maybe_create_access_key(
     create: bool,
     force_new: bool,
     save_path: Path,
-):
+) -> Path | None:
     if not create:
         return None
 
@@ -331,7 +393,10 @@ def _maybe_create_access_key(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Provision IAM user, group, role, and managed policy for TT environment deploy."
+        description=(
+            "Provision IAM user, group, role, and managed policies for TT environment deploy "
+            "(launcher + extensions-service)."
+        )
     )
     parser.add_argument(
         "environment_name",
@@ -350,7 +415,12 @@ def main() -> int:
     parser.add_argument(
         "--custom-username",
         default=None,
-        help=f"Override IAM user name (default: <env>_deployment_tt_user)",
+        help="Override IAM user name (default: <env>_deployment_tt_user)",
+    )
+    parser.add_argument(
+        "--update-policies",
+        action="store_true",
+        help="Create a new default policy version when the generated document differs from AWS",
     )
     parser.add_argument(
         "--create-access-key",
@@ -378,10 +448,11 @@ def main() -> int:
         print("environment_name must be non-empty.", file=sys.stderr)
         return 1
 
-    user_name = (args.custom_username or f"{env_name}_deployment_tt_user").strip()
-    group_name = f"{env_name}_deployment_tt_group"
-    role_name = f"{env_name}_deployment_tt_role"
-    policy_name = f"{env_name}_deployment_tt_policy"
+    user_name         = (args.custom_username or f"{env_name}_deployment_tt_user").strip()
+    group_name        = f"{env_name}_deployment_tt_group"
+    role_name         = f"{env_name}_deployment_tt_role"
+    launcher_policy   = f"{env_name}_deployment_tt_policy"
+    extensions_policy = f"{env_name}_deployment_ext_policy"
 
     account_id = _resolve_account_id(None, args.aws_profile, args.aws_region)
     if not account_id.isdigit() or len(account_id) != 12:
@@ -389,23 +460,51 @@ def main() -> int:
         return 1
 
     deployment_role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
-    policy_document = _policy_document(
+
+    launcher_doc = _policy_document(
         env_name,
         args.aws_region,
         account_id,
         deployment_operator_role_arn=deployment_role_arn,
     )
+    extensions_doc = _extensions_policy_document(env_name, args.aws_region, account_id)
 
     session = boto3.Session(profile_name=args.aws_profile, region_name=args.aws_region)
     iam = session.client("iam")
 
-    policy_arn, _ = _ensure_customer_managed_policy(iam, account_id, policy_name, policy_document)
+    print("\n==> Launcher policy")
+    launcher_arn, _ = _ensure_customer_managed_policy(
+        iam, account_id, launcher_policy, launcher_doc, update=args.update_policies
+    )
+
+    print("\n==> Extensions-service policy")
+    extensions_arn, _ = _ensure_customer_managed_policy(
+        iam, account_id, extensions_policy, extensions_doc, update=args.update_policies
+    )
+
+    policy_arns = [launcher_arn, extensions_arn]
+
+    print("\n==> User")
     _ensure_user(iam, user_name)
+
+    print("\n==> Group")
     _ensure_group(iam, group_name)
-    _ensure_attach_user_policy(iam, user_name, policy_arn)
-    _ensure_attach_group_policy(iam, group_name, policy_arn)
+
+    print("\n==> Attach policies to user")
+    for arn in policy_arns:
+        _ensure_attach_user_policy(iam, user_name, arn)
+
+    print("\n==> Attach policies to group")
+    for arn in policy_arns:
+        _ensure_attach_group_policy(iam, group_name, arn)
+
+    print("\n==> Add user to group")
     _ensure_user_in_group(iam, user_name, group_name)
-    role_arn = _ensure_deployment_role(iam, account_id, role_name, user_name, policy_arn)
+
+    print("\n==> Deployment role")
+    role_arn = _ensure_deployment_role(
+        iam, account_id, role_name, user_name, policy_arns
+    )
 
     default_key_file = _BOOTSTRAP_ROOT / "state" / env_name / f"{env_name}_deployment_tt_access_keys.json"
     key_file = args.access_key_output if args.access_key_output is not None else default_key_file
@@ -419,13 +518,14 @@ def main() -> int:
 
     print("\nSummary")
     print("-------")
-    print(f"  User:        {user_name}")
-    print(f"  Group:       {group_name}")
-    print(f"  Role:        {role_arn}")
-    print(f"  Policy:      {policy_arn}")
-    print(f"  Account:     {account_id}")
+    print(f"  User:              {user_name}")
+    print(f"  Group:             {group_name}")
+    print(f"  Role:              {role_arn}")
+    print(f"  Policy (launcher): {launcher_arn}")
+    print(f"  Policy (ext-svc):  {extensions_arn}")
+    print(f"  Account:           {account_id}")
     if saved_keys_path:
-        print(f"  Access keys: {saved_keys_path}")
+        print(f"  Access keys:       {saved_keys_path}")
     print("\nUse this profile in ~/.aws/config with role_arn + source_profile, or use access keys on the user.")
     return 0
 
