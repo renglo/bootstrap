@@ -1,0 +1,2 @@
+-r ../launcher/cdk/requirements.txt
+boto3
