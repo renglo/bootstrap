@@ -1,8 +1,12 @@
 # Bootstrap — architecture reference (JSON & design)
 
-**Operational quick start (install, uninstall, GitHub sync, flags):** [README.md](README.md)
+**Operational quick start (CDK synth, deploy, write-state, GitHub sync):** [README.md](README.md)
 
-This file keeps **example payloads** and design notes that are too long for the README. The orchestrator (`install.py` / `uninstall.py` / `lib/merger.py`) calls existing launcher and extensions-service CLIs; each repo still works standalone.
+This file keeps **example payloads** and design notes that are too long for the README.
+
+**Current path:** Two CDK stacks (`<env>-stack-a`, `<env>-stack-b`) synthesized to `bootstrap/output/<env>/` via `bootstrap/install.py` (`synth`, optional `ensure-oidc`, `write-state`). State is written to `s3://<bucket>/params/` after CloudFormation completes.
+
+**Legacy path:** `install.py` orchestrator calling `deploy_environment.py` + extensions-service CLIs (see [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)). Each repo can still be used standalone.
 
 ---
 

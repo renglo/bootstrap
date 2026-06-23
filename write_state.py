@@ -11,7 +11,7 @@ Run after CloudFormation completes:
         --aws-region us-east-1 \\
         [--compute-type fargate|ec2|lambda_only]
 
-The data bucket is discovered from the {env_name}-storage stack output.
+The data bucket is discovered from the <env>-stack-a CloudFormation output.
 All state files match the structure previously written to bootstrap/state/<env>/.
 """
 
@@ -29,8 +29,62 @@ import boto3
 from botocore.exceptions import ClientError
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+_BOOTSTRAP_DIR = Path(__file__).resolve().parent
 _BLUEPRINTS_DIR = _WORKSPACE_ROOT / "launcher" / "scripts" / "blueprints"
 _CUSTOMER_CONFIG_PATH = _WORKSPACE_ROOT / "launcher" / "cdk" / "customer-config.json"
+_CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
+if str(_CDK_DIR) not in sys.path:
+    sys.path.insert(0, str(_CDK_DIR))
+from stack_names import stack_a_id, stack_b_id  # noqa: E402
+
+_AUTH_OUTPUT_KEYS = frozenset({"UserPoolId", "UserPoolArn", "AppClientId"})
+_STORAGE_OUTPUT_KEYS = frozenset({"DataBucketName", "DataBucketArn", "EnvName"})
+_RUNTIME_OUTPUT_KEYS = frozenset(
+    {
+        "BackendEcrRepoName",
+        "BackendEcrRepoUri",
+        "TenantPolicyArn",
+        "TenantRoleArn",
+        "CodeDeployAppName",
+        "OidcProviderArn",
+        "OidcDeployRoleArnProduction",
+        "OidcDeployRoleArnStaging",
+    }
+)
+_APP_OUTPUT_KEYS = frozenset(
+    {
+        "BackendLambdaFunctionNameProduction",
+        "BackendLambdaAliasArnProduction",
+        "BackendLambdaLogGroupNameProduction",
+        "RestApiUrlProduction",
+        "WebSocketUrlProduction",
+        "WebSocketConnectionsUrlProduction",
+        "BackendLambdaFunctionNameStaging",
+        "BackendLambdaAliasArnStaging",
+        "BackendLambdaLogGroupNameStaging",
+        "RestApiUrlStaging",
+        "WebSocketUrlStaging",
+        "WebSocketConnectionsUrlStaging",
+        "BackendLambdaArchitecture",
+        "BackendLambdaExecutionRoleArn",
+    }
+)
+_COMPUTE_OUTPUT_KEYS = frozenset(
+    {
+        "HandlersLambdaFunctionName",
+        "HandlersEcrRepoName",
+        "HandlersEcrRepoUri",
+        "HandlersEcsClusterName",
+        "HandlersTaskFamily",
+        "HandlersResultsBucketName",
+        "HandlersExecutionRoleArn",
+        "HandlersTaskRoleArn",
+        "HandlersLambdaRoleArn",
+        "HandlersLambdaLogGroupName",
+        "HandlersOidcDeployRoleArnProduction",
+        "HandlersOidcDeployRoleArnStaging",
+    }
+)
 
 _REST_API_ID_RE = re.compile(r"https://([a-z0-9]+)\.execute-api\.")
 
@@ -59,47 +113,75 @@ def _load_customer_config(config_path: Path | None = None) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _find_extension_infra_dirs(explicit: Path | None) -> list[Path]:
-    if explicit is not None:
-        return [explicit] if explicit.is_dir() else []
-    dirs: list[Path] = []
-    for child in sorted(_WORKSPACE_ROOT.iterdir()):
-        infra = child / "installer" / "infra"
-        if infra.is_dir():
-            dirs.append(infra)
-    return dirs
+def _pick_outputs(outputs: dict[str, str], keys: frozenset[str]) -> dict[str, str]:
+    return {key: value for key in keys if (value := _pick_output(outputs, key))}
 
 
-def _load_extension_payload(
-    env_name: str,
-    extension_infra_dir: Path | None = None,
+def _pick_output(outputs: dict[str, str], key: str) -> str:
+    """Return an output value by contract key, including CDK-sanitized aliases.
+
+    Stack-level CfnOutput ids lose punctuation (e.g. ARBITIUM_THREAT_EVENTS_BUCKET
+    becomes ARBITIUMTHREATEVENTSBUCKET). Match both forms.
+    """
+    if outputs.get(key):
+        return str(outputs[key])
+    normalized = re.sub(r"[^A-Za-z0-9]", "", key)
+    if normalized and outputs.get(normalized):
+        return str(outputs[normalized])
+    for output_key, value in outputs.items():
+        if re.sub(r"[^A-Za-z0-9]", "", output_key) == normalized:
+            return str(value)
+    return ""
+
+
+def _load_extension_state_manifest(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _stack_output_subset(
+    cf_client,
+    stack_name: str,
+    output_keys: list[str],
+) -> dict[str, str]:
+    if not output_keys:
+        return {}
+    outputs = _get_stack_outputs(cf_client, stack_name)
+    return {key: value for key in output_keys if (value := _pick_output(outputs, key))}
+
+
+def _resolve_extension_vars(
+    cf_client,
+    manifest: dict[str, Any] | None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Merge extension vars/secrets from */installer/infra/*.json."""
-    vars_out: dict[str, str] = {}
-    secrets_out: dict[str, str] = {}
+    """Return (runtime_vars, inventory_vars) from the extension stack using the synth manifest."""
+    if not manifest:
+        return {}, {}
 
-    for infra_dir in _find_extension_infra_dirs(extension_infra_dir):
-        ext_cfg = infra_dir / "extension_config.json"
-        if ext_cfg.is_file():
-            data = json.loads(ext_cfg.read_text(encoding="utf-8"))
-            for key, value in data.items():
-                if key == "SECRETS" and isinstance(value, dict):
-                    secrets_out.update({k: str(v) for k, v in value.items()})
-                elif not key.startswith("_") and isinstance(value, str):
-                    vars_out[key] = value
+    stack_name = str(manifest.get("extension_stack", "")).strip()
+    if not stack_name:
+        return {}, {}
 
-        extra = infra_dir / "extra_resources.json"
-        if extra.is_file():
-            data = json.loads(extra.read_text(encoding="utf-8"))
-            file_env = str(data.get("env_name", "")).strip()
-            if file_env and file_env != env_name:
-                continue
-            for key, value in data.get("vars", {}).items():
-                vars_out[key] = str(value)
-            for key, value in data.get("secrets", {}).items():
-                secrets_out[key] = str(value)
+    runtime_keys = [str(k) for k in manifest.get("runtime_stack_outputs", []) if str(k).strip()]
+    inventory_keys = [str(k) for k in manifest.get("inventory_stack_outputs", []) if str(k).strip()]
 
-    return vars_out, secrets_out
+    runtime_vars = _stack_output_subset(cf_client, stack_name, runtime_keys)
+    inventory_vars = _stack_output_subset(cf_client, stack_name, inventory_keys)
+    return runtime_vars, inventory_vars
+
+
+def _extension_blueprints_dir_from_manifest(
+    manifest: dict[str, Any] | None,
+    synth_output_dir: Path | None,
+) -> Path | None:
+    if not manifest or synth_output_dir is None:
+        return None
+    rel = str(manifest.get("blueprints_dir", "")).strip()
+    if not rel:
+        return None
+    candidate = synth_output_dir / rel
+    return candidate if candidate.is_dir() else None
 
 
 def _get_stack_outputs(cf_client, stack_name: str) -> dict[str, str]:
@@ -189,9 +271,9 @@ def _resolve_ecs_networking(
     subnets = ""
     security_groups = ""
     if compute_type == "ec2":
-        params = _get_stack_parameters(cf_client, f"{env_name}-compute")
+        params = _get_stack_parameters(cf_client, stack_b_id(env_name))
         subnets = params.get("SubnetIds", "")
-        security_groups = _find_handlers_security_group(cf_client, f"{env_name}-compute")
+        security_groups = _find_handlers_security_group(cf_client, stack_b_id(env_name))
 
     if not subnets or (compute_type == "fargate" and not security_groups):
         default_subnets, default_sgs = _discover_default_vpc_networking(ec2_client)
@@ -249,51 +331,62 @@ def _preserve_secrets(
     s3_client,
     bucket: str,
     *,
-    extension_secrets: dict[str, str],
+    secret_keys: list[str] | None = None,
 ) -> dict[str, str]:
+    keys = secret_keys if secret_keys is not None else list(_PRESERVED_SECRET_KEYS)
     preserved: dict[str, str] = {}
-    for key in _PRESERVED_SECRET_KEYS:
-        if extension_secrets.get(key):
-            preserved[key] = extension_secrets[key]
 
     for s3_key in ("params/platform_vars.production.json", "params/deploy_input.json"):
         existing = _try_read_s3_json(s3_client, bucket, s3_key)
         if not existing:
             continue
-        for secret_key in _PRESERVED_SECRET_KEYS:
+        for secret_key in keys:
             value = (existing.get("SECRETS") or {}).get(secret_key, "")
             if value and secret_key not in preserved:
                 preserved[secret_key] = str(value)
     return preserved
 
 
-def _upload_blueprints(session: boto3.Session, env_name: str) -> dict[str, list[str]]:
+def _upload_blueprints_from_dir(
+    session: boto3.Session,
+    env_name: str,
+    blueprints_dir: Path,
+    *,
+    label: str,
+) -> dict[str, list[str]]:
     table_name = f"{env_name}_blueprints"
-    dynamodb = session.resource("dynamodb")
-    table = dynamodb.Table(table_name)
-    results: dict[str, list[str]] = {"success": [], "failed": []}
+    table = session.resource("dynamodb").Table(table_name)
+    uploaded: list[str] = []
+    failed: list[str] = []
 
-    if not _BLUEPRINTS_DIR.is_dir():
-        print(f"  [warn] Blueprints directory not found at {_BLUEPRINTS_DIR} — skipping")
-        return results
-
-    for json_file in sorted(_BLUEPRINTS_DIR.glob("*.json")):
+    for json_file in sorted(blueprints_dir.glob("*.json")):
+        irn = json_file.stem
         try:
             blueprint = json.loads(json_file.read_text(encoding="utf-8"))
             if "irn" not in blueprint:
-                blueprint["irn"] = json_file.stem
+                blueprint["irn"] = irn
             if "version" not in blueprint:
                 blueprint["version"] = "latest"
             table.put_item(Item=blueprint)
             key = f"{blueprint['irn']}@{blueprint['version']}"
-            print(f"  [blueprint] uploaded {key}")
-            results["success"].append(key)
+            print(f"  [blueprint:{label}] uploaded {key}")
+            uploaded.append(key)
         except Exception as exc:
-            irn = json_file.stem
-            print(f"  [blueprint] failed {irn}: {exc}")
-            results["failed"].append(f"{irn}: {exc}")
+            print(f"  [blueprint:{label}] failed {irn}: {exc}")
+            failed.append(irn)
 
-    return results
+    return {"uploaded": uploaded, "failed": failed}
+
+
+def _upload_blueprints(session: boto3.Session, env_name: str) -> dict[str, list[str]]:
+    if not _BLUEPRINTS_DIR.is_dir():
+        print(f"  [warn] Blueprints directory not found at {_BLUEPRINTS_DIR} — skipping")
+        return {"success": [], "failed": []}
+
+    result = _upload_blueprints_from_dir(
+        session, env_name, _BLUEPRINTS_DIR, label="launcher"
+    )
+    return {"success": result["uploaded"], "failed": result["failed"]}
 
 
 def _put_s3(s3_client, bucket: str, key: str, body: str, *, content_type: str) -> None:
@@ -317,7 +410,7 @@ def _build_launcher_vars(
     data_bucket: str,
     cognito: dict[str, str],
     runtime: dict[str, str],
-    api: dict[str, str],
+    app: dict[str, str],
     compute: dict[str, str],
     ecs_network: dict[str, str],
     extension_vars: dict[str, str],
@@ -328,10 +421,10 @@ def _build_launcher_vars(
     ws_conn_key = "WebSocketConnectionsUrlProduction" if is_prod else "WebSocketConnectionsUrlStaging"
     ws_url_key = "WebSocketUrlProduction" if is_prod else "WebSocketUrlStaging"
 
-    backend_fn = runtime.get(fn_key, f"{env_name}-backend-{stage}")
-    rest_url = _normalize_url(api.get(rest_key, ""))
-    ws_connections = _normalize_url(api.get(ws_conn_key, ""))
-    ws_url = _normalize_url(api.get(ws_url_key, ""))
+    backend_fn = app.get(fn_key, f"{env_name}-backend-{stage}")
+    rest_url = _normalize_url(app.get(rest_key, ""))
+    ws_connections = _normalize_url(app.get(ws_conn_key, ""))
+    ws_url = _normalize_url(app.get(ws_url_key, ""))
     api_id = _parse_rest_api_id(rest_url)
     handlers_fn = compute.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
     codedeploy_app = runtime.get("CodeDeployAppName", f"{env_name}-backend-codedeploy")
@@ -393,7 +486,7 @@ def _build_deploy_input(
     data_bucket: str,
     cognito: dict[str, str],
     runtime: dict[str, str],
-    api: dict[str, str],
+    app: dict[str, str],
     compute: dict[str, str],
     ecs_network: dict[str, str],
     extension_vars: dict[str, str],
@@ -401,8 +494,8 @@ def _build_deploy_input(
 ) -> dict[str, Any]:
     handlers_fn = compute.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
     handlers_ecr_uri = compute.get("HandlersEcrRepoUri", "")
-    ws_connections = _normalize_url(api.get("WebSocketConnectionsUrlProduction", ""))
-    ws_url = _normalize_url(api.get("WebSocketUrlProduction", ""))
+    ws_connections = _normalize_url(app.get("WebSocketConnectionsUrlProduction", ""))
+    ws_url = _normalize_url(app.get("WebSocketUrlProduction", ""))
 
     vars_dict = _merge_vars(
         {
@@ -449,17 +542,17 @@ def _build_env_config_py(
     aws_region: str,
     cognito: dict[str, str],
     s3_bucket_name: str,
-    api: dict[str, str],
+    app: dict[str, str],
     compute: dict[str, str],
     ecs_network: dict[str, str],
     handlers_fn: str,
     aws_account: str,
     extension_vars: dict[str, str],
 ) -> str:
-    prod_ws_conn = _normalize_url(api.get("WebSocketConnectionsUrlProduction", ""))
-    prod_ws_url = _normalize_url(api.get("WebSocketUrlProduction", ""))
-    staging_ws_conn = _normalize_url(api.get("WebSocketConnectionsUrlStaging", ""))
-    staging_ws_url = _normalize_url(api.get("WebSocketUrlStaging", ""))
+    prod_ws_conn = _normalize_url(app.get("WebSocketConnectionsUrlProduction", ""))
+    prod_ws_url = _normalize_url(app.get("WebSocketUrlProduction", ""))
+    staging_ws_conn = _normalize_url(app.get("WebSocketConnectionsUrlStaging", ""))
+    staging_ws_url = _normalize_url(app.get("WebSocketUrlStaging", ""))
     handlers_arn = _lambda_arn(aws_region, aws_account, handlers_fn)
 
     lines = [
@@ -499,18 +592,19 @@ def _build_env_config_py(
     )
 
     skip = set(_dynamodb_vars(env_name)) | {
-        "EXTERNAL_HANDLERS",
-        "EXTERNAL_HANDLERS_ECS_HANDLERS",
-        "ARBITIUM_THREAT_EVENTS_BUCKET",
+        "ECS_CLUSTER",
+        "ECS_TASK_DEFINITION",
+        "ECS_RESULTS_BUCKET",
+        "ECS_LAUNCH_TYPE",
+        "ECS_NETWORK_MODE",
+        "ECS_SUBNETS",
+        "ECS_SECURITY_GROUPS",
+        "LAMBDA_EXTERNAL_HANDLERS_ARN",
     }
     for key, value in sorted(extension_vars.items()):
         if key in skip:
             continue
         lines.append(f"{key} = {value!r}")
-
-    for key in ("EXTERNAL_HANDLERS", "EXTERNAL_HANDLERS_ECS_HANDLERS", "ARBITIUM_THREAT_EVENTS_BUCKET"):
-        if key in extension_vars:
-            lines.extend(["", f"{key} = {extension_vars[key]!r}"])
 
     return "\n".join(lines) + "\n"
 
@@ -522,7 +616,8 @@ def write_state(
     compute_type: str | None = None,
     *,
     customer_config: dict[str, Any] | None = None,
-    extension_infra_dir: Path | None = None,
+    synth_output_dir: Path | None = None,
+    extension_state_manifest: Path | None = None,
 ) -> dict[str, Any]:
     cfg = customer_config if customer_config is not None else _load_customer_config()
     if cfg.get("env_name", env_name) == env_name:
@@ -544,27 +639,55 @@ def write_state(
     s3c = sess.client("s3")
 
     print(f"\nReading CloudFormation stack outputs for env: {env_name}")
-    auth = _get_stack_outputs(cf, f"{env_name}-auth")
-    storage = _get_stack_outputs(cf, f"{env_name}-storage")
-    runtime = _get_stack_outputs(cf, f"{env_name}-runtime")
-    api = _get_stack_outputs(cf, f"{env_name}-api")
+    stack_a_out = _get_stack_outputs(cf, stack_a_id(env_name))
+    stack_b_out = _get_stack_outputs(cf, stack_b_id(env_name))
+    auth = _pick_outputs(stack_a_out, _AUTH_OUTPUT_KEYS)
+    storage = _pick_outputs(stack_a_out, _STORAGE_OUTPUT_KEYS)
+    runtime = _pick_outputs(stack_a_out, _RUNTIME_OUTPUT_KEYS)
+    app = _pick_outputs(stack_b_out, _APP_OUTPUT_KEYS)
     compute: dict[str, str] = {}
     if compute_type != "lambda_only":
-        compute = _get_stack_outputs(cf, f"{env_name}-compute")
+        compute = _pick_outputs(stack_b_out, _COMPUTE_OUTPUT_KEYS)
 
     data_bucket = storage.get("DataBucketName", "")
     if not data_bucket:
         raise RuntimeError(
-            f"Could not resolve data bucket name from {env_name}-storage stack output 'DataBucketName'. "
+            f"Could not resolve data bucket name from {stack_a_id(env_name)} output 'DataBucketName'. "
             "Make sure CloudFormation has completed successfully."
         )
 
-    extension_vars, extension_secrets = _load_extension_payload(env_name, extension_infra_dir)
-    preserved_secrets = _preserve_secrets(s3c, data_bucket, extension_secrets=extension_secrets)
+    output_dir = synth_output_dir or (_BOOTSTRAP_DIR / "output" / env_name)
+    manifest_path = extension_state_manifest
+    if manifest_path is None:
+        candidate = output_dir / "extension-state.json"
+        if candidate.is_file():
+            manifest_path = candidate
+
+    extension_manifest = _load_extension_state_manifest(manifest_path)
+    if extension_manifest:
+        print(f"\nUsing extension state manifest: {manifest_path}")
+    elif manifest_path is not None:
+        print(f"  [warn] Extension state manifest not found at {manifest_path}")
+
+    extension_vars, extension_inventory = _resolve_extension_vars(cf, extension_manifest)
+    secret_keys = [str(k) for k in (extension_manifest or {}).get("secret_keys", []) if str(k).strip()]
+    preserved_secrets = _preserve_secrets(
+        s3c,
+        data_bucket,
+        secret_keys=secret_keys or None,
+    )
     ecs_network = _resolve_ecs_networking(cf, ec2, env_name, compute_type, network_mode_cfg)
 
     print("\nUploading DynamoDB blueprints...")
     blueprint_results = _upload_blueprints(sess, env_name)
+    ext_blueprints_dir = _extension_blueprints_dir_from_manifest(extension_manifest, output_dir)
+    if ext_blueprints_dir is not None:
+        print(f"\nUploading extension blueprints from {ext_blueprints_dir}...")
+        ext_bp = _upload_blueprints_from_dir(
+            sess, env_name, ext_blueprints_dir, label="extension"
+        )
+        blueprint_results["success"].extend(ext_bp["uploaded"])
+        blueprint_results["failed"].extend(ext_bp["failed"])
 
     cognito_out = {
         "user_pool_id": auth.get("UserPoolId", ""),
@@ -595,32 +718,32 @@ def write_state(
             "ecr_repo_name": runtime.get("BackendEcrRepoName", ""),
             "ecr_repo_uri": runtime.get("BackendEcrRepoUri", ""),
             "production": {
-                "lambda_function_name": runtime.get(
+                "lambda_function_name": app.get(
                     "BackendLambdaFunctionNameProduction", f"{env_name}-backend-production"
                 ),
-                "lambda_alias_arn": runtime.get("BackendLambdaAliasArnProduction", ""),
-                "lambda_execution_role_arn": runtime.get(
+                "lambda_alias_arn": app.get("BackendLambdaAliasArnProduction", ""),
+                "lambda_execution_role_arn": app.get(
                     "BackendLambdaExecutionRoleArn", runtime.get("TenantRoleArn", "")
                 ),
-                "lambda_log_group": runtime.get("BackendLambdaLogGroupNameProduction", ""),
-                "rest_api_url": api.get("RestApiUrlProduction", ""),
-                "websocket_url": api.get("WebSocketUrlProduction", ""),
-                "websocket_connections_url": api.get("WebSocketConnectionsUrlProduction", ""),
+                "lambda_log_group": app.get("BackendLambdaLogGroupNameProduction", ""),
+                "rest_api_url": app.get("RestApiUrlProduction", ""),
+                "websocket_url": app.get("WebSocketUrlProduction", ""),
+                "websocket_connections_url": app.get("WebSocketConnectionsUrlProduction", ""),
                 "codedeploy_app": runtime.get("CodeDeployAppName", ""),
                 "codedeploy_group": f"{env_name}-backend-production",
             },
             "staging": {
-                "lambda_function_name": runtime.get(
+                "lambda_function_name": app.get(
                     "BackendLambdaFunctionNameStaging", f"{env_name}-backend-staging"
                 ),
-                "lambda_alias_arn": runtime.get("BackendLambdaAliasArnStaging", ""),
-                "lambda_execution_role_arn": runtime.get(
+                "lambda_alias_arn": app.get("BackendLambdaAliasArnStaging", ""),
+                "lambda_execution_role_arn": app.get(
                     "BackendLambdaExecutionRoleArn", runtime.get("TenantRoleArn", "")
                 ),
-                "lambda_log_group": runtime.get("BackendLambdaLogGroupNameStaging", ""),
-                "rest_api_url": api.get("RestApiUrlStaging", ""),
-                "websocket_url": api.get("WebSocketUrlStaging", ""),
-                "websocket_connections_url": api.get("WebSocketConnectionsUrlStaging", ""),
+                "lambda_log_group": app.get("BackendLambdaLogGroupNameStaging", ""),
+                "rest_api_url": app.get("RestApiUrlStaging", ""),
+                "websocket_url": app.get("WebSocketUrlStaging", ""),
+                "websocket_connections_url": app.get("WebSocketConnectionsUrlStaging", ""),
                 "codedeploy_group": f"{env_name}-backend-staging",
             },
         },
@@ -645,6 +768,7 @@ def write_state(
             **ecs_network,
         },
         "extension_vars": extension_vars,
+        "extension_inventory": extension_inventory,
         "blueprints_upload": blueprint_results,
     }
 
@@ -655,7 +779,7 @@ def write_state(
         "data_bucket": data_bucket,
         "cognito": cognito_out,
         "runtime": runtime,
-        "api": api,
+        "app": app,
         "compute": compute,
         "ecs_network": ecs_network,
         "extension_vars": extension_vars,
@@ -684,7 +808,7 @@ def write_state(
         github_handlers_repo=github_handlers_repo,
         cognito=cognito_out,
         runtime=runtime,
-        api=api,
+        app=app,
         compute=compute,
         ecs_network=ecs_network,
         extension_vars=extension_vars,
@@ -699,7 +823,7 @@ def write_state(
         aws_region=aws_region,
         cognito=cognito_out,
         s3_bucket_name=data_bucket,
-        api=api,
+        app=app,
         compute=compute,
         ecs_network=ecs_network,
         handlers_fn=handlers_fn,
@@ -742,25 +866,41 @@ def main() -> None:
         help="Path to customer-config.json (default: launcher/cdk/customer-config.json)",
     )
     parser.add_argument(
-        "--extension-infra-dir",
+        "--synth-output",
         default=None,
-        help="Path to extension installer/infra dir (default: auto-discover */installer/infra/)",
+        help="CDK synth output directory (default: bootstrap/output/<env-name>)",
+    )
+    parser.add_argument(
+        "--extension-state-manifest",
+        default=None,
+        help="Path to extension-state.json from synth (default: bootstrap/output/<env>/extension-state.json)",
     )
     args = parser.parse_args()
 
     config_path = Path(args.customer_config) if args.customer_config else None
     customer_config = _load_customer_config(config_path)
     compute_type = args.compute_type or customer_config.get("compute_type")
-    extension_dir = Path(args.extension_infra_dir) if args.extension_infra_dir else None
+    env_name = args.env_name
+    synth_output = (
+        Path(args.synth_output)
+        if args.synth_output
+        else (_BOOTSTRAP_DIR / "output" / env_name)
+    )
+    manifest_path = Path(args.extension_state_manifest) if args.extension_state_manifest else None
+    if manifest_path is None:
+        candidate = synth_output / "extension-state.json"
+        if candidate.is_file():
+            manifest_path = candidate
 
     try:
         write_state(
-            env_name=args.env_name,
+            env_name=env_name,
             aws_profile=args.aws_profile,
             aws_region=args.aws_region,
             compute_type=str(compute_type) if compute_type else None,
             customer_config=customer_config,
-            extension_infra_dir=extension_dir,
+            synth_output_dir=synth_output,
+            extension_state_manifest=manifest_path,
         )
         print("\nDone.")
     except Exception as exc:
