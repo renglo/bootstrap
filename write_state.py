@@ -83,6 +83,9 @@ _COMPUTE_OUTPUT_KEYS = frozenset(
         "HandlersLambdaLogGroupName",
         "HandlersOidcDeployRoleArnProduction",
         "HandlersOidcDeployRoleArnStaging",
+        "HandlersComputeVpcId",
+        "HandlersComputeSubnetIds",
+        "HandlersComputeSecurityGroupId",
     }
 )
 
@@ -256,11 +259,13 @@ def _resolve_ecs_networking(
     env_name: str,
     compute_type: str,
     network_mode_cfg: str | None,
+    compute_outputs: dict[str, str] | None = None,
 ) -> dict[str, str]:
     if compute_type == "lambda_only":
         return {
             "ECS_LAUNCH_TYPE": "",
             "ECS_NETWORK_MODE": "",
+            "ECS_VPC": "",
             "ECS_SUBNETS": "",
             "ECS_SECURITY_GROUPS": "",
         }
@@ -268,12 +273,19 @@ def _resolve_ecs_networking(
     launch_type = compute_type
     network_mode = "awsvpc" if compute_type == "fargate" else (network_mode_cfg or "bridge").strip() or "bridge"
 
+    compute_outputs = compute_outputs or {}
+    vpc_id = ""
     subnets = ""
     security_groups = ""
     if compute_type == "ec2":
-        params = _get_stack_parameters(cf_client, stack_b_id(env_name))
-        subnets = params.get("SubnetIds", "")
-        security_groups = _find_handlers_security_group(cf_client, stack_b_id(env_name))
+        vpc_id = compute_outputs.get("HandlersComputeVpcId", "")
+        subnets = compute_outputs.get("HandlersComputeSubnetIds", "")
+        security_groups = compute_outputs.get("HandlersComputeSecurityGroupId", "")
+        if not subnets:
+            params = _get_stack_parameters(cf_client, stack_b_id(env_name))
+            subnets = params.get("SubnetIds", "")
+        if not security_groups:
+            security_groups = _find_handlers_security_group(cf_client, stack_b_id(env_name))
 
     if not subnets or (compute_type == "fargate" and not security_groups):
         default_subnets, default_sgs = _discover_default_vpc_networking(ec2_client)
@@ -281,10 +293,16 @@ def _resolve_ecs_networking(
             subnets = default_subnets
         if not security_groups:
             security_groups = default_sgs
+        if not vpc_id and compute_type == "ec2":
+            vpcs = ec2_client.describe_vpcs(Filters=[{"Name": "isDefault", "Values": ["true"]}])
+            vpcs_list = vpcs.get("Vpcs", [])
+            if vpcs_list:
+                vpc_id = vpcs_list[0]["VpcId"]
 
     return {
         "ECS_LAUNCH_TYPE": launch_type,
         "ECS_NETWORK_MODE": network_mode,
+        "ECS_VPC": vpc_id,
         "ECS_SUBNETS": subnets,
         "ECS_SECURITY_GROUPS": security_groups,
     }
@@ -585,6 +603,7 @@ def _build_env_config_py(
             f"ECS_RESULTS_BUCKET = {compute.get('HandlersResultsBucketName', '')!r}",
             f"ECS_LAUNCH_TYPE = {ecs_network.get('ECS_LAUNCH_TYPE', '')!r}",
             f"ECS_NETWORK_MODE = {ecs_network.get('ECS_NETWORK_MODE', '')!r}",
+            f"ECS_VPC = {ecs_network.get('ECS_VPC', '')!r}",
             f"ECS_SUBNETS = {ecs_network.get('ECS_SUBNETS', '')!r}",
             f"ECS_SECURITY_GROUPS = {ecs_network.get('ECS_SECURITY_GROUPS', '')!r}",
             f"LAMBDA_EXTERNAL_HANDLERS_ARN = {handlers_arn!r}",
@@ -597,6 +616,7 @@ def _build_env_config_py(
         "ECS_RESULTS_BUCKET",
         "ECS_LAUNCH_TYPE",
         "ECS_NETWORK_MODE",
+        "ECS_VPC",
         "ECS_SUBNETS",
         "ECS_SECURITY_GROUPS",
         "LAMBDA_EXTERNAL_HANDLERS_ARN",
@@ -676,7 +696,9 @@ def write_state(
         data_bucket,
         secret_keys=secret_keys or None,
     )
-    ecs_network = _resolve_ecs_networking(cf, ec2, env_name, compute_type, network_mode_cfg)
+    ecs_network = _resolve_ecs_networking(
+        cf, ec2, env_name, compute_type, network_mode_cfg, compute
+    )
 
     print("\nUploading DynamoDB blueprints...")
     blueprint_results = _upload_blueprints(sess, env_name)
