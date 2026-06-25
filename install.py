@@ -13,16 +13,14 @@ Usage:
 
 Workflow:
     1. Fill launcher/cdk/customer-config.json from customer-config.example.json
-    2. Run: python bootstrap/install.py ensure-oidc --aws-profile <profile>
-           (one-time per AWS account; creates the GitHub Actions OIDC provider)
-    3. Run: python bootstrap/install.py synth
-    4. Deliver bootstrap/output/<env>/ to customer (<env>-stack-a + <env>-stack-b templates)
-    5. Customer deploys from bootstrap/output/<env>/:
-           cdk deploy <env>-stack-a --app "python app.py"
-           python upload_seed_image.py ...
-           cdk deploy <env>-stack-b --app "python app.py" [--parameters VpcId=... SubnetIds=...]
-    6. Run: python bootstrap/install.py write-state --env-name <env> ...
-    7. OIDC CI/CD (GitHub Actions): push image to private ECR, create/update Lambda, wire API permissions
+    2. Run: python bootstrap/install.py synth
+    3. Deliver bootstrap/output/<env>/ to customer (templates + extension state at root)
+    4. Customer deploys:
+           aws cloudformation deploy ... (templates at output/<env>/ root), or
+           cdk deploy from output/<env>/cdk/
+           python bootstrap/upload_seed_image.py ... (between stack-a and stack-b)
+    5. Run: python bootstrap/install.py write-state --env-name <env> ...
+    6. OIDC CI/CD (GitHub Actions): push image to private ECR, create/update Lambda, wire API permissions
 """
 
 from __future__ import annotations
@@ -41,18 +39,15 @@ _BOOTSTRAP_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
 _CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
 _COMPUTE_STACK_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "compute_stack.py"
-_SEED_IMAGE_SCRIPT = _WORKSPACE_ROOT / "launcher" / "scripts" / "upload_seed_image.py"
-_SEED_IMAGE_DIR = _WORKSPACE_ROOT / "launcher" / "scripts" / "backend" / "seed-image"
+_CDK_SUBDIR = "cdk"
 
 _PACKAGE_FILES = (
     "app.py",
     "stack_names.py",
     "extension_loader.py",
-    "extension_state_bundle.py",
     "platform_defaults.py",
     "platform_defaults.json",
     "requirements.txt",
-    "customer-config.example.json",
 )
 
 
@@ -106,6 +101,10 @@ def _default_output_path(env_name: str) -> Path:
     return _BOOTSTRAP_DIR / "output" / env_name
 
 
+def _cdk_output_path(env_name: str) -> Path:
+    return _default_output_path(env_name) / _CDK_SUBDIR
+
+
 def _remove_cdk_out_marker(output_path: Path) -> None:
     """Remove CDK synth version marker file that blocks `cdk deploy` on Windows.
 
@@ -119,37 +118,36 @@ def _remove_cdk_out_marker(output_path: Path) -> None:
         print(f"  Removed CDK synth marker file: {marker.name}")
 
 
-def _package_deploy_tree(output_path: Path) -> None:
-    """Copy CDK app sources into the synth output so deploy can run from that folder."""
+def _package_deploy_tree(cdk_dir: Path) -> None:
+    """Copy CDK app sources into cdk/ so `cdk deploy --app python app.py` works."""
     for name in _PACKAGE_FILES:
         src = _CDK_DIR / name
         if src.is_file():
-            shutil.copy2(src, output_path / name)
+            shutil.copy2(src, cdk_dir / name)
 
     config_src = _CDK_DIR / "customer-config.json"
     if config_src.is_file():
-        shutil.copy2(config_src, output_path / "customer-config.json")
+        shutil.copy2(config_src, cdk_dir / "customer-config.json")
 
     stacks_src = _CDK_DIR / "stacks"
-    stacks_dest = output_path / "stacks"
+    stacks_dest = cdk_dir / "stacks"
     if stacks_dest.exists():
         shutil.rmtree(stacks_dest)
     shutil.copytree(stacks_src, stacks_dest)
 
-    extensions_dest = output_path / "extensions"
+    extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
 
 
-def _copy_seed_image_tooling(output_path: Path) -> None:
-    """Copy seed image upload script and Docker build context into the deploy package."""
-    if _SEED_IMAGE_SCRIPT.is_file():
-        shutil.copy2(_SEED_IMAGE_SCRIPT, output_path / "upload_seed_image.py")
-    seed_dest = output_path / "seed-image"
-    if _SEED_IMAGE_DIR.is_dir():
-        if seed_dest.exists():
-            shutil.rmtree(seed_dest)
-        shutil.copytree(_SEED_IMAGE_DIR, seed_dest)
+def _copy_templates_to_env_root(cdk_dir: Path, env_root: Path, env_name: str) -> list[Path]:
+    """Copy CloudFormation templates to env root for aws cloudformation deploy."""
+    copied: list[Path] = []
+    for src in sorted(cdk_dir.glob(f"{env_name}-stack-*.template.json")):
+        dest = env_root / src.name
+        shutil.copy2(src, dest)
+        copied.append(dest)
+    return copied
 
 
 def cmd_synth(extension_path: str | None) -> None:
@@ -169,26 +167,27 @@ def cmd_synth(extension_path: str | None) -> None:
         sys.exit(1)
 
     ext_path = (extension_path or str(cfg.get("extension_path", ""))).strip()
-    output_path = _default_output_path(env_name)
-    if output_path.exists():
-        shutil.rmtree(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
+    env_root = _default_output_path(env_name)
+    cdk_dir = env_root / _CDK_SUBDIR
+    if env_root.exists():
+        shutil.rmtree(env_root)
+    cdk_dir.mkdir(parents=True, exist_ok=True)
 
     python = sys.executable
     cdk = _cdk_executable()
     print(f"\nRunning cdk synth in {_CDK_DIR}")
-    print(f"Output directory: {output_path}")
+    print(f"CDK assembly: {cdk_dir}")
     result = subprocess.run(
-        [cdk, "synth", "--app", _cdk_app_command(python), "--output", str(output_path)],
+        [cdk, "synth", "--app", _cdk_app_command(python), "--output", str(cdk_dir)],
         cwd=str(_CDK_DIR),
     )
     if result.returncode != 0:
         sys.exit(result.returncode)
 
-    _remove_cdk_out_marker(output_path)
+    _remove_cdk_out_marker(cdk_dir)
 
-    print("\nPackaging deploy tree...")
-    _package_deploy_tree(output_path)
+    print("\nPackaging CDK deploy tree...")
+    _package_deploy_tree(cdk_dir)
 
     if ext_path:
         sys.path.insert(0, str(_CDK_DIR))
@@ -197,47 +196,43 @@ def cmd_synth(extension_path: str | None) -> None:
 
         print("\nBundling extension infra...")
         bundle_extension_infra(
-            output_path,
+            cdk_dir,
             workspace_root=_WORKSPACE_ROOT,
             extension_path=ext_path,
         )
 
         print("\nEmitting extension state bundle...")
         emit_extension_state_bundle(
-            output_path,
+            env_root,
             env_name=env_name,
             extension_path=ext_path,
             workspace_root=_WORKSPACE_ROOT,
         )
 
-    _copy_seed_image_tooling(output_path)
-
-    templates = sorted(output_path.glob(f"{env_name}-stack-*.template.json"))
+    templates = _copy_templates_to_env_root(cdk_dir, env_root, env_name)
     stack_a = f"{env_name}-stack-a"
     stack_b = f"{env_name}-stack-b"
     print("\nSynthesis complete.")
-    print(f"Output directory: {output_path}")
+    print(f"Output directory: {env_root}")
     if templates:
-        print("Generated templates:")
+        print("CloudFormation templates (env root):")
         for t in templates:
             print(f"  {t.name}")
-    print("\nDeploy from this directory:")
-    print(f"  cd {output_path}")
-    print(f'  cdk deploy {stack_a} --app "python app.py" --output .')
-    print(f'  python upload_seed_image.py --env-name {env_name} --aws-profile <profile>')
+    print(f"\nCDK deploy package: {cdk_dir}")
+    print("\nDeploy with CloudFormation CLI (from env root):")
+    print(f"  cd {env_root}")
+    print(f"  aws cloudformation deploy --template-file {stack_a}.template.json ...")
+    print(f"  cd <infra-installer>")
+    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
+    print(f"  cd {env_root}")
+    print(f"  aws cloudformation deploy --template-file {stack_b}.template.json ...")
+    print("\nDeploy with CDK CLI (from cdk/):")
+    print(f"  cd {cdk_dir}")
+    print(f'  cdk deploy {stack_a} --app "python app.py" --output . [--parameters CreateGitHubOIDC=true]')
+    print(f"  cd <infra-installer>")
+    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
+    print(f"  cd {cdk_dir}")
     print(f'  cdk deploy {stack_b} --app "python app.py" --output .')
-
-
-def cmd_ensure_oidc(aws_profile: str | None, aws_region: str, dry_run: bool) -> None:
-    """Ensure the GitHub Actions OIDC provider exists (account-level prerequisite)."""
-    sys.path.insert(0, str(Path(__file__).parent))
-    from ensure_oidc_provider import ensure_github_oidc_provider  # noqa: PLC0415
-
-    ensure_github_oidc_provider(
-        aws_profile=aws_profile,
-        aws_region=aws_region,
-        apply_changes=not dry_run,
-    )
 
 
 def cmd_write_state(
@@ -284,14 +279,6 @@ def main() -> None:
         help="Extension repo folder under workspace root (default: extension_path in customer-config.json)",
     )
 
-    p_oidc = sub.add_parser(
-        "ensure-oidc",
-        help="Create the GitHub Actions OIDC provider in the AWS account (one-time, run before cdk deploy)",
-    )
-    p_oidc.add_argument("--aws-profile", default=None, help="AWS named profile")
-    p_oidc.add_argument("--aws-region", default="us-east-1", help="AWS region (default: us-east-1)")
-    p_oidc.add_argument("--dry-run", action="store_true", help="Plan without creating resources")
-
     p_state = sub.add_parser(
         "write-state",
         help="Post-deploy: read CF outputs, upload blueprints, write state to S3",
@@ -321,8 +308,6 @@ def main() -> None:
 
     if args.command == "synth":
         cmd_synth(args.extension_path)
-    elif args.command == "ensure-oidc":
-        cmd_ensure_oidc(args.aws_profile, args.aws_region, args.dry_run)
     elif args.command == "write-state":
         cmd_write_state(
             args.env_name,
