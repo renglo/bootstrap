@@ -37,7 +37,7 @@ if str(_CDK_DIR) not in sys.path:
     sys.path.insert(0, str(_CDK_DIR))
 from stack_names import stack_a_id, stack_b_id  # noqa: E402
 
-_AUTH_OUTPUT_KEYS = frozenset({"UserPoolId", "UserPoolArn", "AppClientId"})
+_AUTH_OUTPUT_KEYS = frozenset({"UserPoolId", "UserPoolArn", "AppClientId", "CognitoDomain"})
 _STORAGE_OUTPUT_KEYS = frozenset({"DataBucketName", "DataBucketArn", "EnvName"})
 _RUNTIME_OUTPUT_KEYS = frozenset(
     {
@@ -49,6 +49,10 @@ _RUNTIME_OUTPUT_KEYS = frozenset(
         "OidcProviderArn",
         "OidcDeployRoleArnProduction",
         "OidcDeployRoleArnStaging",
+        "AmplifyAppId",
+        "AmplifyDefaultDomain",
+        "AmplifyConsoleUrlProduction",
+        "AmplifyConsoleUrlStaging",
     }
 )
 _APP_OUTPUT_KEYS = frozenset(
@@ -438,6 +442,7 @@ def _build_launcher_vars(
     rest_key = "RestApiUrlProduction" if is_prod else "RestApiUrlStaging"
     ws_conn_key = "WebSocketConnectionsUrlProduction" if is_prod else "WebSocketConnectionsUrlStaging"
     ws_url_key = "WebSocketUrlProduction" if is_prod else "WebSocketUrlStaging"
+    console_url_key = "AmplifyConsoleUrlProduction" if is_prod else "AmplifyConsoleUrlStaging"
 
     backend_fn = app.get(fn_key, f"{env_name}-backend-{stage}")
     rest_url = _normalize_url(app.get(rest_key, ""))
@@ -446,6 +451,7 @@ def _build_launcher_vars(
     api_id = _parse_rest_api_id(rest_url)
     handlers_fn = compute.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
     codedeploy_app = runtime.get("CodeDeployAppName", f"{env_name}-backend-codedeploy")
+    console_url = _normalize_url(runtime.get(console_url_key, ""))
 
     base: dict[str, str] = {
         "WL_NAME": env_name,
@@ -458,6 +464,8 @@ def _build_launcher_vars(
         "COGNITO_REGION": aws_region,
         "COGNITO_USERPOOL_ID": cognito.get("user_pool_id", ""),
         "COGNITO_APP_CLIENT_ID": cognito.get("app_client_id", ""),
+        "COGNITO_DOMAIN": cognito.get("cognito_domain", ""),
+        "VITE_COGNITO_DOMAIN": cognito.get("cognito_domain", ""),
         "COGNITO_CHECK_TOKEN_EXPIRATION": "True",
         "PREVIEW_LAYER": "2",
         "S3_BUCKET_NAME": data_bucket,
@@ -471,6 +479,10 @@ def _build_launcher_vars(
         "WEBSOCKET_CONNECTIONS": ws_connections,
         "WEBSOCKET_URL": ws_url,
         "VITE_WEBSOCKET_URL": ws_url,
+        "AMPLIFY_APP_ID": runtime.get("AmplifyAppId", ""),
+        "AMPLIFY_DEFAULT_DOMAIN": runtime.get("AmplifyDefaultDomain", ""),
+        "AMPLIFY_CONSOLE_URL": console_url,
+        "VITE_AMPLIFY_CONSOLE_URL": console_url,
         "ECS_CLUSTER": compute.get("HandlersEcsClusterName", ""),
         "ECS_TASK_DEFINITION": compute.get("HandlersTaskFamily", ""),
         "ECS_RESULTS_BUCKET": compute.get("HandlersResultsBucketName", ""),
@@ -715,6 +727,7 @@ def write_state(
         "user_pool_id": auth.get("UserPoolId", ""),
         "user_pool_arn": auth.get("UserPoolArn", ""),
         "app_client_id": auth.get("AppClientId", ""),
+        "cognito_domain": auth.get("CognitoDomain", ""),
     }
     handlers_fn = compute.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
 
@@ -788,6 +801,12 @@ def write_state(
             "lambda_role_arn": compute.get("HandlersLambdaRoleArn", ""),
             "lambda_log_group": compute.get("HandlersLambdaLogGroupName", ""),
             **ecs_network,
+        },
+        "console": {
+            "amplify_app_id": runtime.get("AmplifyAppId", ""),
+            "default_domain": runtime.get("AmplifyDefaultDomain", ""),
+            "production_url": runtime.get("AmplifyConsoleUrlProduction", ""),
+            "staging_url": runtime.get("AmplifyConsoleUrlStaging", ""),
         },
         "extension_vars": extension_vars,
         "extension_inventory": extension_inventory,

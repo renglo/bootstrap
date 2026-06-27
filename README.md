@@ -180,7 +180,7 @@ cdk deploy "$ENV-stack-b" \
 **Notes:**
 
 - `CreateGitHubOIDC` on **`<env>-stack-a`** — set to `true` only on first deploy in an account without the GitHub Actions OIDC provider (`token.actions.githubusercontent.com`). Default is `false`. Check with `aws iam list-open-id-connect-providers`.
-- With `compute_type=ec2`, stack-b creates a dedicated handlers VPC; no `VpcId` or `SubnetIds` at deploy time.
+- With `compute_type=ec2`, stack-b exposes **`HandlersNetworkMode`** on **`<env>-stack-b`** (`create` default, or `existing` with `ExistingVpcId` / `ExistingSubnetIds`). In `create` mode the stack provisions a dedicated handlers VPC and subnets; in `existing` mode it uses customer VPC/subnets and still creates a dedicated security group. Synth does not need AWS credentials.
 - Stack-b templates may reference a CDK bootstrap asset for S3 auto-delete; the account needs `cdk bootstrap` (or a prior CDK deploy) in that region.
 - Large stack-b templates: upload via `--s3-bucket` using the data bucket from stack-a (see appendix).
 - All IAM deploys require `--capabilities CAPABILITY_NAMED_IAM` when using `aws cloudformation deploy`.
@@ -381,6 +381,17 @@ To create the GitHub OIDC provider on first deploy in a new account, add to stac
 ```bash
   --parameter-overrides CreateGitHubOIDC=true \
 ```
+
+To use an existing VPC and subnets for handlers EC2 capacity (when `compute_type=ec2`), add to stack-b:
+
+```bash
+  --parameter-overrides \
+    HandlersNetworkMode=existing \
+    ExistingVpcId=vpc-0123456789abcdef0 \
+    ExistingSubnetIds=subnet-aaa,subnet-bbb
+```
+
+`ExistingSubnetIds` must belong to `ExistingVpcId` and should span at least two Availability Zones.
 
 ---
 
