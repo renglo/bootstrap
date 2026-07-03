@@ -1,8 +1,12 @@
 # Bootstrap — architecture reference (JSON & design)
 
-**Operational quick start (install, uninstall, GitHub sync, flags):** [README.md](README.md)
+**Operational quick start (CDK synth, deploy, SSM bootstrap config):** [README.md](README.md)
+ 
+This file keeps **example payloads** and design notes that are too long for the README.
 
-This file keeps **example payloads** and design notes that are too long for the README. The orchestrator (`install.py` / `uninstall.py` / `lib/merger.py`) calls existing launcher and extensions-service CLIs; each repo still works standalone.
+**Current path:** Two CDK stacks (`<env>-stack-a`, `<env>-stack-b`) synthesized to `bootstrap/output/<env>/` via `bootstrap/install.py` (`synth`). Stack A can optionally create the account GitHub OIDC provider via the `CreateGitHubOIDC` parameter. Bootstrap config is written to SSM Parameter Store automatically when stack-b deploys.
+
+**Legacy path:** `install.py` orchestrator calling `deploy_environment.py` + extensions-service CLIs (see [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)). Each repo can still be used standalone.
 
 ---
 
@@ -34,7 +38,6 @@ Partial venv setup: `bash bootstrap/setup-venvs.sh --launcher-only` or `--extens
 
 | File | Purpose |
 |------|---------|
-| `platform_resources.json` | Full inventory (uninstall / tooling) |
 | `platform_vars.production.json` | **Releases** repo → `inject_github_env_vars.py` |
 | `platform_vars.staging.json` | Same for staging (if launcher wrote `staging.json`) |
 | `deploy_input.json` | **Handlers** stage 2 + GitHub Environment |
@@ -60,7 +63,6 @@ extensions-service/state/<extension>/
     lambda_env_export.json
 
 bootstrap/state/<extension>/
-    platform_resources.json
     platform_vars.production.json
     platform_vars.staging.json
     deploy_input.json
@@ -90,48 +92,6 @@ python teardown_environment.py <extension> \
 
 ---
 
-## Example: `platform_resources.json`
-
-Inventory used by uninstall and tooling:
-
-```json
-{
-  "environment": "arbitiumrs",
-  "aws_region": "us-east-1",
-  "updated_at": "2026-05-12T00:00:00+00:00",
-  "launcher": {
-    "dynamodb": { "tables": { "arbitiumrs_entities": "arn:..." } },
-    "cognito": { "user_pool_id": "...", "app_client_id": "..." },
-    "iam": { "policy_name": "...", "role_name": "..." },
-    "s3": { "bucket_name": "...", "created": true },
-    "backend": {
-      "ecr": { "repository_name": "arbitiumrs_backend" },
-      "production": { "lambda_function_name": "...", "rest_api_id": "...", "websocket_api_id": "..." },
-      "staging": { "...": "..." }
-    },
-    "github_oidc": { "production_role_arn": "...", "staging_role_arn": "..." }
-  },
-  "extensions_service": {
-    "lambda": {
-      "function_name": "arbitiumrs-handlers",
-      "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:us-east-1:123456789012:function:arbitiumrs-handlers"
-    },
-    "ecr": { "repository": "arbitiumrs-handlers-ecs" },
-    "ecs": { "cluster": "arbitiumrs-handlers", "launch_type": "ec2", "subnets": ["..."] },
-    "buckets": { "ecs_results_bucket": "arbitiumrs-handlers-ecs-..." },
-    "iam": { "task_role": "...", "execution_role": "..." },
-    "github_oidc": {
-      "github_repo": "Org/handlers-repo",
-      "oidc_provider_arn": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com",
-      "production": { "role_name": "...", "role_arn": "...", "policy_name": "..." },
-      "staging": { "role_name": "...", "role_arn": "...", "policy_name": "..." }
-    }
-  }
-}
-```
-
----
-
 ## Example: `platform_vars.production.json`
 
 GitHub Environment for the **releases** repo (merged from `launcher/state/<ext>/production.json` + handlers `provision_manifest.json`). `OPENAI_API_KEY` is excluded (user-managed).
@@ -146,14 +106,15 @@ GitHub Environment for the **releases** repo (merged from `launcher/state/<ext>/
     "LAMBDA_EXTERNAL_HANDLERS_ARN": "arn:aws:lambda:us-east-1:123456789012:function:arbitiumrs-handlers",
     "ECS_CLUSTER": "arbitiumrs-handlers",
     "ECS_TASK_DEFINITION": "arbitiumrs-handlers-ecs",
-    "ECS_LAUNCH_TYPE": "ec2",
-    "ECS_SUBNETS": "subnet-xxx,subnet-yyy"
+    "ECS_LAUNCH_TYPE": "ec2"
   },
   "SECRETS": {
     "AWS_GITHUB_OIDC_ROLE_ARN": "arn:aws:iam::..."
   }
 }
 ```
+
+When using `compute_type=ec2`, `ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS` are written to separate SSM parameters (`/{env}/bootstrap/ecs-*`) at deploy time. CI/CD merges them into `VARS` (see `bootstrap/helpers/merge_bootstrap_ssm.py`).
 
 ---
 

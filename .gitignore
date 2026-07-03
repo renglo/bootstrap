@@ -1,0 +1,6 @@
+# Local Python venv (bootstrap/setup-venvs.sh --bootstrap-only)
+venv/
+
+# Per-environment CDK synth output (bootstrap/install.py synth)
+output/*
+!output/.gitignore

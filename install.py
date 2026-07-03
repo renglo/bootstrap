@@ -1,411 +1,300 @@
-"""Platform installer orchestrator.
-
-Runs launcher (deploy_environment.py) + extensions-service (provision-infra apply)
-then merges both manifests into bootstrap/state/<extension>/.
+"""Platform installer: synthesizes the CDK template for customer delivery.
 
 Usage:
-    # Lambda-only (default — no ECS cluster provisioned):
-    python bootstrap/install.py <extension> \\
-        --profile acd-arbitium-tt-dev \\
-        --aws-region us-east-1 \\
-        --github-repo Org/repo
+    # Synth templates (reads launcher/cdk/customer-config.json):
+    python bootstrap/install.py synth
 
-    # Lambda + ECS (add ECS cluster, ECR, S3 results bucket):
-    python bootstrap/install.py <extension> \\
-        --profile acd-arbitium-tt-dev \\
-        --aws-region us-east-1 \\
-        --github-repo Org/repo \\
-        --launch-type ec2    # or fargate
-
-    # Skip one of the two provisioning steps (useful for re-runs):
-    python bootstrap/install.py <extension> ... --skip-launcher
-    python bootstrap/install.py <extension> ... --skip-extensions
-
-    # Only merge existing manifests without reprovisioning:
-    python bootstrap/install.py <extension> ... --merge-only
-
-Prerequisites:
-    Run once to create/update the required venvs for each repo:
-        bash bootstrap/setup-venvs.sh
+Workflow:
+    1. Fill launcher/cdk/customer-config.json from customer-config.example.json
+    2. Run: python bootstrap/install.py synth
+    3. Deliver bootstrap/output/<env>/ to customer (templates + extension state at root)
+    4. Customer deploys:
+           aws cloudformation deploy ... (templates at output/<env>/ root), or
+           cdk deploy from output/<env>/cdk/
+           python bootstrap/upload_seed_image.py ... (between stack-a and stack-b)
+    5. OIDC CI/CD reads bootstrap config from SSM Parameter Store
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-_PLATFORM_INSTALLER_ROOT = Path(__file__).resolve().parent
-_WORKSPACE_ROOT = _PLATFORM_INSTALLER_ROOT.parent
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+_BOOTSTRAP_DIR = Path(__file__).resolve().parent
+_BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
+_CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
+_COMPUTE_STACK_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "compute_stack.py"
+_CDK_SUBDIR = "cdk"
 
-# Add bootstrap dir to sys.path so lib.merger is importable
-sys.path.insert(0, str(_PLATFORM_INSTALLER_ROOT))
+_PACKAGE_FILES = (
+    "app.py",
+    "stack_names.py",
+    "extension_loader.py",
+    "platform_defaults.py",
+    "platform_defaults.json",
+    "requirements.txt",
+)
 
-# ---------------------------------------------------------------------------
-# Venv resolution — each repo has its own venv; fall back to sys.executable
-# with a clear error message so the user knows what to fix.
-# ---------------------------------------------------------------------------
 
-def _resolve_python(repo_label: str, venv_dir: Path) -> str:
-    """Return the Python executable for a repo venv, or abort with setup instructions."""
-    candidates = [
-        venv_dir / "bin" / "python",       # Linux / macOS / WSL
-        venv_dir / "Scripts" / "python.exe",  # Windows native
-    ]
-    for candidate in candidates:
+def _resolve_python(venv_dir: Path) -> str:
+    for candidate in (venv_dir / "bin" / "python", venv_dir / "Scripts" / "python.exe"):
         if candidate.is_file():
             return str(candidate)
-
-    print(f"\nERROR: venv not found for {repo_label}.")
+    print("\nERROR: bootstrap venv not found.")
     print(f"  Expected: {venv_dir}")
-    print(f"\n  Run the following to create all required venvs:")
-    print(f"    bash bootstrap/setup-venvs.sh")
-    print(f"\n  Or set up {repo_label} standalone:")
-    if repo_label == "launcher":
-        print(f"    cd launcher && python3.12 -m venv launch-venv && launch-venv/bin/pip install -r requirements.txt")
-    else:
-        print(f"    cd extensions-service && python3.12 -m venv venv && venv/bin/pip install -r requirements.txt")
+    print("\n  Run: bash bootstrap/setup-venvs.sh --bootstrap-only")
     sys.exit(1)
 
 
-def _launcher_python() -> str:
-    return _resolve_python("launcher", _WORKSPACE_ROOT / "launcher" / "launch-venv")
+def _bootstrap_python() -> str:
+    return _resolve_python(_BOOTSTRAP_VENV)
 
 
-def _extensions_python() -> str:
-    """extensions-service venv (boto3) for provision-infra OIDC; fall back to sys.executable."""
-    venv_dir = _WORKSPACE_ROOT / "extensions-service" / "venv"
-    candidates = [
-        venv_dir / "bin" / "python",
-        venv_dir / "Scripts" / "python.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    # Fallback: OIDC bootstrap needs boto3; install with handlers OIDC should use venv (see setup-venvs.sh).
-    return sys.executable
+def _ensure_bootstrap_python() -> None:
+    bootstrap_py = _bootstrap_python()
+    if Path(sys.executable).resolve() != Path(bootstrap_py).resolve():
+        os.execv(bootstrap_py, [bootstrap_py, *sys.argv])
 
 
-def _run_subprocess(cmd: list[str], cwd: Path, description: str) -> None:
-    """Run a subprocess command, printing progress. Exits on failure."""
-    import subprocess
+def _cdk_app_command(python: str) -> str:
+    if " " in python:
+        return f'"{python}" app.py'
+    return f"{python} app.py"
 
-    print(f"\n{'=' * 60}")
-    print(f"  {description}")
-    print(f"  {' '.join(cmd)}")
-    print(f"{'=' * 60}")
-    result = subprocess.run(cmd, cwd=str(cwd))
+
+def _load_customer_config() -> dict:
+    config_file = _CDK_DIR / "customer-config.json"
+    if not config_file.is_file():
+        return {}
+    return json.loads(config_file.read_text(encoding="utf-8"))
+
+
+def _cdk_executable() -> str:
+    if platform.system() == "Windows":
+        cdk = shutil.which("cdk.cmd") or shutil.which("cdk")
+    else:
+        cdk = shutil.which("cdk")
+    if not cdk:
+        raise RuntimeError(
+            "CDK CLI not found. Install with: npm install -g aws-cdk\n"
+            "Then run: bash bootstrap/setup-venvs.sh --bootstrap-only"
+        )
+    return cdk
+
+
+def _default_output_path(env_name: str) -> Path:
+    return _BOOTSTRAP_DIR / "output" / env_name
+
+
+def _cdk_output_path(env_name: str) -> Path:
+    return _default_output_path(env_name) / _CDK_SUBDIR
+
+
+def _remove_cdk_out_marker(output_path: Path) -> None:
+    """Remove CDK synth version marker file that blocks `cdk deploy` on Windows.
+
+    `cdk synth --output <dir>` writes a small `cdk.out` *file* into the assembly
+    directory. `cdk deploy` expects `cdk.out/` to be a directory in cwd — remove
+    the marker so deploy can create the real cache directory.
+    """
+    marker = output_path / "cdk.out"
+    if marker.is_file():
+        marker.unlink()
+        print(f"  Removed CDK synth marker file: {marker.name}")
+
+
+def _package_blueprints(cdk_dir: Path, extension_path: str) -> None:
+    """Stage blueprint JSON for the stack-b custom resource asset."""
+    dest = cdk_dir / "bootstrap-assets" / "blueprints"
+    if dest.exists():
+        shutil.rmtree(dest)
+    launcher_src = _WORKSPACE_ROOT / "launcher" / "scripts" / "blueprints"
+    if launcher_src.is_dir():
+        shutil.copytree(launcher_src, dest / "launcher")
+    if extension_path:
+        ext_root = _WORKSPACE_ROOT / extension_path
+        for candidate in (ext_root / "blueprints", ext_root / "installer" / "blueprints"):
+            if candidate.is_dir():
+                shutil.copytree(candidate, dest / "extension")
+                break
+
+
+def _package_lib(cdk_dir: Path) -> None:
+    lib_dest = cdk_dir / "lib"
+    lib_dest.mkdir(parents=True, exist_ok=True)
+    src = _BOOTSTRAP_DIR / "lib" / "config_builder.py"
+    if src.is_file():
+        shutil.copy2(src, lib_dest / "config_builder.py")
+        init_file = lib_dest / "__init__.py"
+        if not init_file.is_file():
+            init_file.write_text("", encoding="utf-8")
+    cdk_lib_src = _CDK_DIR / "lib" / "config_builder.py"
+    if cdk_lib_src.is_file():
+        shutil.copy2(cdk_lib_src, lib_dest / "config_builder.py")
+
+
+def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
+    """Copy CDK app sources into cdk/ so `cdk deploy --app python app.py` works."""
+    for name in _PACKAGE_FILES:
+        src = _CDK_DIR / name
+        if src.is_file():
+            shutil.copy2(src, cdk_dir / name)
+
+    config_src = _CDK_DIR / "customer-config.json"
+    if config_src.is_file():
+        shutil.copy2(config_src, cdk_dir / "customer-config.json")
+
+    stacks_src = _CDK_DIR / "stacks"
+    stacks_dest = cdk_dir / "stacks"
+    if stacks_dest.exists():
+        shutil.rmtree(stacks_dest)
+    shutil.copytree(stacks_src, stacks_dest)
+
+    extensions_dest = cdk_dir / "extensions"
+    extensions_dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
+
+    _package_lib(cdk_dir)
+    _package_blueprints(cdk_dir, extension_path)
+
+
+def _copy_templates_to_env_root(cdk_dir: Path, env_root: Path, env_name: str) -> list[Path]:
+    """Copy CloudFormation templates to env root for aws cloudformation deploy."""
+    copied: list[Path] = []
+    for src in sorted(cdk_dir.glob(f"{env_name}-stack-*.template.json")):
+        dest = env_root / src.name
+        shutil.copy2(src, dest)
+        copied.append(dest)
+    return copied
+
+
+def cmd_synth(extension_path: str | None) -> None:
+    """Run cdk synth and report the output path."""
+    config_file = _CDK_DIR / "customer-config.json"
+    if not config_file.is_file():
+        example = _CDK_DIR / "customer-config.example.json"
+        print(f"\nERROR: customer-config.json not found.")
+        print(f"  Copy the example and fill it in:")
+        print(f"    cp {example} {config_file}")
+        sys.exit(1)
+
+    cfg = _load_customer_config()
+    env_name = str(cfg.get("env_name", "")).strip()
+    if not env_name:
+        print("\nERROR: customer-config.json must set env_name.")
+        sys.exit(1)
+
+    ext_path = (extension_path or str(cfg.get("extension_path", ""))).strip()
+    env_root = _default_output_path(env_name)
+    cdk_dir = env_root / _CDK_SUBDIR
+    if env_root.exists():
+        shutil.rmtree(env_root)
+    cdk_dir.mkdir(parents=True, exist_ok=True)
+
+    python = sys.executable
+    cdk = _cdk_executable()
+    print(f"\nRunning cdk synth in {_CDK_DIR}")
+    print(f"CDK assembly: {cdk_dir}")
+    result = subprocess.run(
+        [cdk, "synth", "--app", _cdk_app_command(python), "--output", str(cdk_dir)],
+        cwd=str(_CDK_DIR),
+    )
     if result.returncode != 0:
-        print(f"\nFailed: {description} (exit code {result.returncode})")
         sys.exit(result.returncode)
 
+    _remove_cdk_out_marker(cdk_dir)
 
-def _read_ecs_profile(ext_folder: Path) -> dict:
-    """Read ecs_profile.json from <ext_folder>/installer/infra/ if it exists."""
-    profile_file = ext_folder / "installer" / "infra" / "ecs_profile.json"
-    if not profile_file.is_file():
-        return {}
-    with open(profile_file, encoding="utf-8") as f:
-        return json.load(f)
+    print("\nPackaging CDK deploy tree...")
+    _package_deploy_tree(cdk_dir, extension_path=ext_path)
 
+    if ext_path:
+        sys.path.insert(0, str(_CDK_DIR))
+        from extension_loader import bundle_extension_infra  # noqa: PLC0415
+        from extension_state_bundle import emit_extension_state_bundle  # noqa: PLC0415
 
-def _seed_runtime_profile(
-    ext_folder: Path,
-    extension: str,
-    extensions_service_root: Path,
-) -> None:
-    """Seed extensions-service/state/<ext>/runtime_profile.json from ecs_profile.json.
+        print("\nBundling extension infra...")
+        bundle_extension_infra(
+            cdk_dir,
+            workspace_root=_WORKSPACE_ROOT,
+            extension_path=ext_path,
+        )
 
-    Only written when the file does not yet exist (first-time default).
-    Subsequent runs preserve whatever extensions-service last saved.
-    """
-    ecs_profile_file = ext_folder / "installer" / "infra" / "ecs_profile.json"
-    if not ecs_profile_file.is_file():
-        return
+        print("\nEmitting extension state bundle...")
+        emit_extension_state_bundle(
+            env_root,
+            env_name=env_name,
+            extension_path=ext_path,
+            workspace_root=_WORKSPACE_ROOT,
+        )
 
-    runtime_profile_path = extensions_service_root / "state" / extension / "runtime_profile.json"
-    if runtime_profile_path.is_file():
-        return  # Already seeded; extensions-service manages updates from here
-
-    from datetime import datetime, timezone
-    data = json.loads(ecs_profile_file.read_text(encoding="utf-8"))
-    profile = {
-        "state_version": 1,
-        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-    }
-    profile.update(data)
-    runtime_profile_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(runtime_profile_path, "w", encoding="utf-8") as f:
-        json.dump(profile, f, indent=2)
-        f.write("\n")
-    print(f"\n[extension-specific] Seeded runtime profile → {runtime_profile_path}")
-
-
-def _run_extension_specific(
-    ext_folder: Path,
-    env_name: str,
-    profile: str,
-    aws_region: str,
-    dry_run: bool,
-) -> Path | None:
-    """Run provision_extension.sh from <ext_folder>/installer/infra/ if present.
-
-    Returns the path to extra_resources.json if it was written, else None.
-    """
-    script = ext_folder / "installer" / "infra" / "provision_extension.sh"
-    if not script.is_file():
-        print(f"\n[extension-specific] provision_extension.sh not found at {script} — skipping")
-        return None
-    cmd = ["bash", str(script), env_name, "--aws-profile", profile, "--aws-region", aws_region]
-    if dry_run:
-        cmd.append("--dry-run")
-    _run_subprocess(
-        cmd,
-        cwd=ext_folder / "installer" / "infra",
-        description=f"Extension-specific provision: {ext_folder.name}",
-    )
-    extra_resources = ext_folder / "installer" / "infra" / "extra_resources.json"
-    return extra_resources if extra_resources.is_file() else None
-
-
-def _run_launcher(extension: str, profile: str, aws_region: str, github_repo: str) -> None:
-    launcher_scripts = _WORKSPACE_ROOT / "launcher" / "scripts"
-    _run_subprocess(
-        [
-            _launcher_python(),
-            "deploy_environment.py",
-            extension,
-            "--aws-profile", profile,
-            "--aws-region", aws_region,
-            "--github-repo", github_repo,
-        ],
-        cwd=launcher_scripts,
-        description=f"Launcher: deploy environment '{extension}'",
-    )
-
-
-def _run_extensions_service(
-    extension: str,
-    profile: str,
-    launch_type: str | None,
-    handlers_github_repo: str,
-    handlers_enable_staging_role: bool,
-) -> None:
-    ext_service = _WORKSPACE_ROOT / "extensions-service"
-    cmd: list[str] = [
-        _extensions_python(),
-        "run.py",
-        extension,
-        "provision-infra",
-        "apply",
-        "--profile",
-        profile,
-        "--github-repo",
-        handlers_github_repo,
-    ]
-    if launch_type is not None:
-        cmd += ["--launch-type", launch_type]
-    if handlers_enable_staging_role:
-        cmd.append("--enable-handlers-staging-role")
-    mode = f"launch-type={launch_type}" if launch_type else "lambda-only"
-    _run_subprocess(
-        cmd,
-        cwd=ext_service,
-        description=f"Extensions-service: provision infra '{extension}' ({mode})",
-    )
+    templates = _copy_templates_to_env_root(cdk_dir, env_root, env_name)
+    stack_a = f"{env_name}-stack-a"
+    stack_b = f"{env_name}-stack-b"
+    print("\nSynthesis complete.")
+    print(f"Output directory: {env_root}")
+    if templates:
+        print("CloudFormation templates (env root):")
+        for t in templates:
+            print(f"  {t.name}")
+    print(f"\nCDK deploy package: {cdk_dir}")
+    print("\nDeploy with CloudFormation CLI (from env root):")
+    print(f"  cd {env_root}")
+    print(f"  aws cloudformation deploy --template-file {stack_a}.template.json ...")
+    print(f"  cd <infra-installer>")
+    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
+    print(f"  cd {env_root}")
+    print(f"  aws cloudformation deploy --template-file {stack_b}.template.json ...")
+    print("\nDeploy with CDK CLI (from cdk/):")
+    print(f"  cd {cdk_dir}")
+    print(f'  cdk deploy {stack_a} --app "python app.py" --output . [--parameters CreateGitHubOIDC=true]')
+    print(f"  cd <infra-installer>")
+    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
+    print(f"  cd {cdk_dir}")
+    print(f'  cdk deploy {stack_b} --app "python app.py" --output .')
+    print("\nAfter stack-b deploy, bootstrap config is in SSM:")
+    print(f"  /{env_name}/bootstrap/platform-vars/production")
+    print(f"  /{env_name}/bootstrap/platform-vars/staging")
+    print(f"  /{env_name}/bootstrap/deploy-input")
+    print(f"  /{env_name}/bootstrap/ecs-vpc            (ec2 compute only)")
+    print(f"  /{env_name}/bootstrap/ecs-subnets         (ec2 compute only)")
+    print(f"  /{env_name}/bootstrap/ecs-security-groups (ec2 compute only)")
+    print("CI/CD reads these parameters via OIDC (merge ecs-* into VARS; see bootstrap/README.md §7).")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Platform installer: orchestrates launcher + extensions-service provisioning",
+        description="Platform installer — CDK synth for customer delivery",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "extension",
-        help="Platform environment name (launcher + extensions prefix, e.g. myenv)",
-    )
-    parser.add_argument(
-        "--profile",
-        required=True,
-        help="AWS named profile with sufficient rights",
-    )
-    parser.add_argument(
-        "--aws-region",
-        default="us-east-1",
-        help="AWS region (default: us-east-1)",
-    )
-    parser.add_argument(
-        "--github-repo",
-        required=True,
-        help="GitHub org/repo trusted for release/OIDC deploy roles (e.g. Org/repo)",
-    )
-    parser.add_argument(
-        "--handlers-github-repo",
+    sub = parser.add_subparsers(dest="command")
+
+    p_synth = sub.add_parser("synth", help="Run cdk synth and generate CloudFormation templates")
+    p_synth.add_argument(
+        "--extension-path",
         default=None,
-        help="GitHub org/repo for handlers (extensions) OIDC; defaults to --github-repo when omitted",
+        help="Extension repo folder under workspace root (default: extension_path in customer-config.json)",
     )
-    parser.add_argument(
-        "--handlers-enable-staging-role",
-        action="store_true",
-        help="Also create handlers OIDC IAM role for GitHub Environment 'staging'",
-    )
-    parser.add_argument(
-        "--launch-type",
-        default=None,
-        choices=["ec2", "fargate"],
-        help="ECS launch type: ec2 or fargate. Omit to provision Lambda-only (no ECS cluster).",
-    )
-    parser.add_argument(
-        "--skip-launcher",
-        action="store_true",
-        help="Skip launcher deploy (run extensions-service only)",
-    )
-    parser.add_argument(
-        "--skip-extensions",
-        action="store_true",
-        help="Skip extensions-service provision (run launcher only)",
-    )
-    parser.add_argument(
-        "--merge-only",
-        action="store_true",
-        help="Skip provisioning; only merge existing state manifests",
-    )
-    parser.add_argument(
-        "--tenant",
-        default=None,
-        help=(
-            "Optional tenant prefix for ENVIRONMENT in bootstrap state JSON only "
-            "(e.g. acme → ENVIRONMENT acme_production). Does not change launcher or extensions-service."
-        ),
-    )
-    parser.add_argument(
-        "--extension-specific",
-        default=None,
-        metavar="FOLDER",
-        help=(
-            "Extension repo folder under workspace (path name only, not the platform env). "
-            "Runs <folder>/installer/infra/provision_extension.sh if present; "
-            "reads <folder>/installer/infra/ecs_profile.json for default ECS settings when --launch-type is omitted."
-        ),
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Skip AWS provisioning for launcher and extensions-service. "
-            "If --extension-specific is set, runs provision_extension.sh in dry-run mode. "
-            "Merges existing state manifests into platform state."
-        ),
-    )
+
     args = parser.parse_args()
 
-    print(f"\nPlatform installer — extension: {args.extension}")
-    print(f"  AWS profile : {args.profile}")
-    print(f"  AWS region  : {args.aws_region}")
-    handlers_repo = args.handlers_github_repo or args.github_repo
-    print(f"  GitHub repo (release/OIDC) : {args.github_repo}")
-    print(f"  GitHub repo (handlers) : {handlers_repo}")
-    if args.dry_run:
-        print("  Mode        : DRY-RUN")
-    if args.tenant:
-        print(f"  Tenant      : {args.tenant.strip()} (GitHub ENVIRONMENT → {args.tenant.strip()}_<stage>)")
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
 
-    # Resolve ECS launch type: explicit CLI flag > ecs_profile.json > None (lambda-only)
-    launch_type = args.launch_type
-    ext_folder: Path | None = None
-    extra_resources_path: Path | None = None
+    _ensure_bootstrap_python()
 
-    if args.extension_specific:
-        ext_folder = _WORKSPACE_ROOT / args.extension_specific
-        if not ext_folder.is_dir():
-            print(f"\nERROR: --extension-specific folder not found: {ext_folder}", file=sys.stderr)
-            sys.exit(1)
-        if launch_type is None:
-            ecs_profile = _read_ecs_profile(ext_folder)
-            if ecs_profile.get("launch_type"):
-                launch_type = ecs_profile["launch_type"]
-                print(
-                    f"  ECS launch type : {launch_type} "
-                    f"(from {args.extension_specific}/installer/infra/ecs_profile.json)"
-                )
-
-    print(f"  Launch type : {launch_type or 'lambda-only (no ECS)'}")
-
-    skip_provisioning = args.merge_only or args.dry_run
-    if not skip_provisioning:
-        if not args.skip_launcher:
-            _run_launcher(
-                extension=args.extension,
-                profile=args.profile,
-                aws_region=args.aws_region,
-                github_repo=args.github_repo,
-            )
-        else:
-            print("\n[launcher] SKIPPED (--skip-launcher)")
-
-        # Seed runtime_profile.json from ecs_profile.json before extensions-service runs,
-        # so provision_ecs_capacity.sh picks up the extension's declared capacity settings.
-        if ext_folder is not None and not args.skip_extensions:
-            _seed_runtime_profile(ext_folder, args.extension, _WORKSPACE_ROOT / "extensions-service")
-
-        if not args.skip_extensions:
-            _run_extensions_service(
-                extension=args.extension,
-                profile=args.profile,
-                launch_type=launch_type,
-                handlers_github_repo=handlers_repo,
-                handlers_enable_staging_role=args.handlers_enable_staging_role,
-            )
-        else:
-            print("\n[extensions-service] SKIPPED (--skip-extensions)")
+    if args.command == "synth":
+        cmd_synth(args.extension_path)
     else:
-        reason = "--merge-only" if args.merge_only else "--dry-run"
-        print(f"\n[provisioning] SKIPPED ({reason})")
-
-    # Extension-specific provisioning (runs even in dry-run, passing --dry-run through)
-    if ext_folder is not None and not args.merge_only:
-        extra_resources_path = _run_extension_specific(
-            ext_folder=ext_folder,
-            env_name=args.extension,
-            profile=args.profile,
-            aws_region=args.aws_region,
-            dry_run=args.dry_run,
-        )
-
-    # If merge-only or provision was skipped, try to locate an existing extra_resources.json
-    if extra_resources_path is None and ext_folder is not None:
-        er = ext_folder / "installer" / "infra" / "extra_resources.json"
-        if er.is_file():
-            extra_resources_path = er
-            print(f"\n[extension-specific] Using existing extra_resources.json: {er}")
-
-    # Merge manifests into platform state
-    from lib.merger import merge_manifests
-
-    platform_state = merge_manifests(
-        extension=args.extension,
-        launcher_root=_WORKSPACE_ROOT / "launcher",
-        extensions_service_root=_WORKSPACE_ROOT / "extensions-service",
-        platform_installer_root=_PLATFORM_INSTALLER_ROOT,
-        aws_region=args.aws_region,
-        tenant=args.tenant,
-        extension_extra_resources=extra_resources_path,
-    )
-
-    print(f"\nInstallation complete for extension: {args.extension}")
-    print(f"Platform state : {platform_state}")
-    print("\nKey output files:")
-    for fname in (
-        "platform_resources.json",
-        "platform_vars.production.json",
-        "platform_vars.staging.json",
-        "deploy_input.json",
-        "env_config.py",
-    ):
-        fpath = platform_state / fname
-        marker = "+" if fpath.exists() else "!"
-        print(f"  [{marker}] {fpath}")
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
