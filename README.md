@@ -187,60 +187,73 @@ cdk deploy "$ENV-stack-b" \
 
 ---
 
-## 6. Post-deploy: write state
+## 6. Bootstrap config in SSM (automatic on stack-b)
 
-Reads CloudFormation outputs (including extension resources via `extension-state.json` from synth output), uploads platform and extension blueprints to DynamoDB, and writes state to S3 (`s3://<bucket>/params/`):
+Stack-b writes bootstrap config to **SSM Parameter Store** and uploads blueprints to DynamoDB (custom resource). No post-deploy script is required.
+
+| SSM parameter | Purpose | OIDC reader |
+|---------------|---------|-------------|
+| `/{env}/bootstrap/platform-vars/production` | Releases repo CI — production | `GitHubActionsDeployRole-{env}-production` |
+| `/{env}/bootstrap/platform-vars/staging` | Releases repo CI — staging | `GitHubActionsDeployRole-{env}-staging` |
+| `/{env}/bootstrap/deploy-input` | Handlers repo CI | `GitHubActionsHandlersRole-{env}-production` |
+| `/{env}/bootstrap/ecs-vpc` | Handlers EC2 VPC ID (`compute_type=ec2` only) | releases + handlers OIDC roles |
+| `/{env}/bootstrap/ecs-subnets` | Comma-separated subnet IDs | releases + handlers OIDC roles |
+| `/{env}/bootstrap/ecs-security-groups` | Handlers EC2 security group ID | releases + handlers OIDC roles |
+
+Each JSON envelope has `GITHUB_REPOSITORY`, `ENVIRONMENT`, `VARS`, and `SECRETS` (always `{}`). Application secrets (e.g. `OPENAI_API_KEY`) are **repo secrets** in GitHub, not in SSM.
+
+`ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS` are **not** inside the JSON envelopes (CloudFormation `Fn::If` tokens cannot be serialized with `Fn::to_json_string`). CI/CD must read the three `ecs-*` parameters and merge them into runtime `VARS` as `ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS`.
+
+**Verify after stack-b:**
 
 ```bash
-cd <infra-installer>
-python bootstrap/install.py write-state \
-  --env-name <env> \
-  --aws-profile <aws-profile> \
-  --aws-region <aws-region>
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/platform-vars/production" \
+  --query Parameter.Value \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
 ```
-
-The extension state manifest (`extension-state.json`) is generated during `install.py synth` when `extension_path` is set. It lists which CloudFormation outputs from **`<env>-stack-b`** become runtime env vars vs inventory-only metadata.
-
-Files written to S3 (bucket = `<env>-<aws-account>-<aws-region>` lowercase):
-
-| S3 object | Purpose |
-|-----------|---------|
-| `params/platform_vars.production.json` | GitHub Environment **production** for the **releases** repo |
-| `params/platform_vars.staging.json` | GitHub Environment **staging** for the **releases** repo |
-| `params/deploy_input.json` | GitHub Environment for the **handlers** repo |
-| `params/platform_resources.json` | Full environment inventory |
-| `params/env_config.py` | Python app config |
 
 ---
 
-## 7. Sync GitHub Environment variables
+## 7. CI/CD contract
 
-Requires: `gh auth login`
+Configure GitHub Actions workflows to:
 
-Download JSON from S3 and push to GitHub:
+1. Assume the OIDC role created by the stack (`AWS_GITHUB_OIDC_ROLE_ARN` — set by the customer in the workflow).
+2. Read the SSM parameter for that repo/stage:
 
 ```bash
-export ENV=<env>
-export AWS_PROFILE=<aws-profile>
-export AWS_REGION=<aws-region>
-export BUCKET="${ENV}-<aws-account>-${AWS_REGION}"   # all lowercase
+# Releases production example
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/platform-vars/production" \
+  --query Parameter.Value --output text | jq -r '.VARS.BASE_URL'
 
-mkdir -p /tmp/state
-aws s3 cp "s3://${BUCKET}/params/platform_vars.production.json" /tmp/state/production.json --profile "$AWS_PROFILE"
-aws s3 cp "s3://${BUCKET}/params/platform_vars.staging.json"    /tmp/state/staging.json    --profile "$AWS_PROFILE"
-aws s3 cp "s3://${BUCKET}/params/deploy_input.json"            /tmp/state/deploy_input.json --profile "$AWS_PROFILE"
+# Handlers example
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/deploy-input" \
+  --query Parameter.Value --output text | jq -r '.VARS.LAMBDA_HANDLERS_FUNCTION_NAME'
 
-cd <infra-installer>
+# Merge ECS network into platform-vars or deploy-input (recommended):
+python bootstrap/helpers/merge_bootstrap_ssm.py "${ENV}" production \
+  --aws-profile "$AWS_PROFILE" --aws-region "$AWS_REGION" > platform_vars.production.json
 
-# Releases repo (backend) — production and staging
-python bootstrap/helpers/inject_github_env_vars.py --json /tmp/state/production.json
-python bootstrap/helpers/inject_github_env_vars.py --json /tmp/state/staging.json
-
-# Handlers repo (extensions)
-python bootstrap/helpers/inject_github_env_vars.py --json /tmp/state/deploy_input.json
+python bootstrap/helpers/merge_bootstrap_ssm.py "${ENV}" deploy-input \
+  --aws-profile "$AWS_PROFILE" --aws-region "$AWS_REGION" > deploy_input.json
 ```
 
-`inject_github_env_vars.py` creates the GitHub Environment if missing, updates VARS/SECRETS, and removes keys that are no longer in the JSON.
+Or merge manually in shell:
+
+```bash
+ECS_VPC=$(aws ssm get-parameter --name "/${ENV}/bootstrap/ecs-vpc" --query Parameter.Value --output text)
+ECS_SUBNETS=$(aws ssm get-parameter --name "/${ENV}/bootstrap/ecs-subnets" --query Parameter.Value --output text)
+ECS_SG=$(aws ssm get-parameter --name "/${ENV}/bootstrap/ecs-security-groups" --query Parameter.Value --output text)
+# jq ... | jq --arg vpc "$ECS_VPC" --arg subnets "$ECS_SUBNETS" --arg sg "$ECS_SG" \
+#   '.VARS.ECS_VPC=$vpc | .VARS.ECS_SUBNETS=$subnets | .VARS.ECS_SECURITY_GROUPS=$sg'
+```
+
+`bootstrap/helpers/inject_github_env_vars.py` remains in the repo as a legacy utility but is **not** part of the bootstrap flow.
 
 ---
 
@@ -251,9 +264,7 @@ setup-venvs
   → customer-config.json
   → synth  →  bootstrap/output/<env>/  (templates + state at root; cdk/ for CDK deploy)
   → deploy stack-a → bootstrap/upload_seed_image.py → deploy stack-b
-  → write-state
-  → inject_github_env_vars (production, staging, deploy_input)
-  → CI/CD (GitHub Actions) deploys real images to ECR/Lambda
+  → CI/CD (GitHub Actions via OIDC reads SSM, deploys images to ECR/Lambda)
 ```
 
 ---

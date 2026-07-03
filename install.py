@@ -4,13 +4,6 @@ Usage:
     # Synth templates (reads launcher/cdk/customer-config.json):
     python bootstrap/install.py synth
 
-    # Post-deploy state write (run after customer executes CloudFormation):
-    python bootstrap/install.py write-state \\
-        --env-name myenv \\
-        --aws-profile my-profile \\
-        --aws-region us-east-1 \\
-        [--compute-type fargate|ec2|lambda_only]
-
 Workflow:
     1. Fill launcher/cdk/customer-config.json from customer-config.example.json
     2. Run: python bootstrap/install.py synth
@@ -19,8 +12,7 @@ Workflow:
            aws cloudformation deploy ... (templates at output/<env>/ root), or
            cdk deploy from output/<env>/cdk/
            python bootstrap/upload_seed_image.py ... (between stack-a and stack-b)
-    5. Run: python bootstrap/install.py write-state --env-name <env> ...
-    6. OIDC CI/CD (GitHub Actions): push image to private ECR, create/update Lambda, wire API permissions
+    5. OIDC CI/CD reads bootstrap config from SSM Parameter Store
 """
 
 from __future__ import annotations
@@ -118,7 +110,37 @@ def _remove_cdk_out_marker(output_path: Path) -> None:
         print(f"  Removed CDK synth marker file: {marker.name}")
 
 
-def _package_deploy_tree(cdk_dir: Path) -> None:
+def _package_blueprints(cdk_dir: Path, extension_path: str) -> None:
+    """Stage blueprint JSON for the stack-b custom resource asset."""
+    dest = cdk_dir / "bootstrap-assets" / "blueprints"
+    if dest.exists():
+        shutil.rmtree(dest)
+    launcher_src = _WORKSPACE_ROOT / "launcher" / "scripts" / "blueprints"
+    if launcher_src.is_dir():
+        shutil.copytree(launcher_src, dest / "launcher")
+    if extension_path:
+        ext_root = _WORKSPACE_ROOT / extension_path
+        for candidate in (ext_root / "blueprints", ext_root / "installer" / "blueprints"):
+            if candidate.is_dir():
+                shutil.copytree(candidate, dest / "extension")
+                break
+
+
+def _package_lib(cdk_dir: Path) -> None:
+    lib_dest = cdk_dir / "lib"
+    lib_dest.mkdir(parents=True, exist_ok=True)
+    src = _BOOTSTRAP_DIR / "lib" / "config_builder.py"
+    if src.is_file():
+        shutil.copy2(src, lib_dest / "config_builder.py")
+        init_file = lib_dest / "__init__.py"
+        if not init_file.is_file():
+            init_file.write_text("", encoding="utf-8")
+    cdk_lib_src = _CDK_DIR / "lib" / "config_builder.py"
+    if cdk_lib_src.is_file():
+        shutil.copy2(cdk_lib_src, lib_dest / "config_builder.py")
+
+
+def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
     """Copy CDK app sources into cdk/ so `cdk deploy --app python app.py` works."""
     for name in _PACKAGE_FILES:
         src = _CDK_DIR / name
@@ -138,6 +160,9 @@ def _package_deploy_tree(cdk_dir: Path) -> None:
     extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
+
+    _package_lib(cdk_dir)
+    _package_blueprints(cdk_dir, extension_path)
 
 
 def _copy_templates_to_env_root(cdk_dir: Path, env_root: Path, env_name: str) -> list[Path]:
@@ -187,7 +212,7 @@ def cmd_synth(extension_path: str | None) -> None:
     _remove_cdk_out_marker(cdk_dir)
 
     print("\nPackaging CDK deploy tree...")
-    _package_deploy_tree(cdk_dir)
+    _package_deploy_tree(cdk_dir, extension_path=ext_path)
 
     if ext_path:
         sys.path.insert(0, str(_CDK_DIR))
@@ -233,41 +258,19 @@ def cmd_synth(extension_path: str | None) -> None:
     print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
     print(f"  cd {cdk_dir}")
     print(f'  cdk deploy {stack_b} --app "python app.py" --output .')
-
-
-def cmd_write_state(
-    env_name: str,
-    aws_profile: str | None,
-    aws_region: str,
-    compute_type: str | None,
-    extension_state_manifest: str | None,
-) -> None:
-    """Delegate to bootstrap/write_state.py."""
-    sys.path.insert(0, str(Path(__file__).parent))
-    from write_state import write_state  # noqa: PLC0415
-
-    cfg = _load_customer_config()
-    output_path = _default_output_path(env_name)
-    manifest_path = Path(extension_state_manifest) if extension_state_manifest else None
-    if manifest_path is None:
-        candidate = output_path / "extension-state.json"
-        if candidate.is_file():
-            manifest_path = candidate
-
-    write_state(
-        env_name=env_name,
-        aws_profile=aws_profile,
-        aws_region=aws_region,
-        compute_type=compute_type,
-        customer_config=cfg,
-        synth_output_dir=output_path,
-        extension_state_manifest=manifest_path,
-    )
+    print("\nAfter stack-b deploy, bootstrap config is in SSM:")
+    print(f"  /{env_name}/bootstrap/platform-vars/production")
+    print(f"  /{env_name}/bootstrap/platform-vars/staging")
+    print(f"  /{env_name}/bootstrap/deploy-input")
+    print(f"  /{env_name}/bootstrap/ecs-vpc            (ec2 compute only)")
+    print(f"  /{env_name}/bootstrap/ecs-subnets         (ec2 compute only)")
+    print(f"  /{env_name}/bootstrap/ecs-security-groups (ec2 compute only)")
+    print("CI/CD reads these parameters via OIDC (merge ecs-* into VARS; see bootstrap/README.md §7).")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Platform installer — CDK synth + post-deploy state write",
+        description="Platform installer — CDK synth for customer delivery",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
@@ -277,25 +280,6 @@ def main() -> None:
         "--extension-path",
         default=None,
         help="Extension repo folder under workspace root (default: extension_path in customer-config.json)",
-    )
-
-    p_state = sub.add_parser(
-        "write-state",
-        help="Post-deploy: read CF outputs, upload blueprints, write state to S3",
-    )
-    p_state.add_argument("--env-name", required=True, help="Environment name")
-    p_state.add_argument("--aws-profile", default=None, help="AWS named profile")
-    p_state.add_argument("--aws-region", default="us-east-1", help="AWS region")
-    p_state.add_argument(
-        "--compute-type",
-        default=None,
-        choices=["lambda_only", "fargate", "ec2"],
-        help="Default: customer-config.json compute_type",
-    )
-    p_state.add_argument(
-        "--extension-state-manifest",
-        default=None,
-        help="Path to extension-state.json from synth (default: bootstrap/output/<env>/extension-state.json)",
     )
 
     args = parser.parse_args()
@@ -308,14 +292,6 @@ def main() -> None:
 
     if args.command == "synth":
         cmd_synth(args.extension_path)
-    elif args.command == "write-state":
-        cmd_write_state(
-            args.env_name,
-            args.aws_profile,
-            args.aws_region,
-            args.compute_type,
-            args.extension_state_manifest,
-        )
     else:
         parser.print_help()
         sys.exit(1)

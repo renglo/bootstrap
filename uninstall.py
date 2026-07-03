@@ -3,9 +3,6 @@
 Tears down both extensions-service ECS infra and launcher backend/core infra
 by delegating to each repo's own teardown command (same flags unified here).
 
-Reads bootstrap/state/<extension>/platform_resources.json to derive
-the AWS region used during provisioning.
-
 Usage:
     python bootstrap/uninstall.py <extension> \\
         --profile acd-arbitium-tt-dev \\
@@ -25,7 +22,6 @@ Teardown order:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,18 +100,6 @@ def _run_extension_teardown(
         cwd=ext_folder / "installer" / "infra",
         description=f"Extension-specific teardown: {ext_folder.name}",
     )
-
-
-def _read_platform_resources(extension: str) -> dict:
-    path = _PLATFORM_INSTALLER_ROOT / "state" / extension / "platform_resources.json"
-    if path.is_file():
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-
-def _resolve_region(platform_resources: dict, fallback: str) -> str:
-    return str(platform_resources.get("aws_region") or fallback)
 
 
 @dataclass(frozen=True)
@@ -208,7 +192,7 @@ def main() -> None:
     parser.add_argument(
         "--aws-region",
         default="us-east-1",
-        help="AWS region (fallback if not found in platform_resources.json)",
+        help="AWS region",
     )
     parser.add_argument(
         "--yes",
@@ -251,8 +235,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    platform_resources = _read_platform_resources(args.extension)
-    aws_region = _resolve_region(platform_resources, args.aws_region)
+    aws_region = args.aws_region
 
     opts = UnifiedTeardownOptions(
         keep_logs=args.keep_logs,
