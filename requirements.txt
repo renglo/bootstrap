@@ -1,2 +1,3 @@
 -r ../launcher/cdk/requirements.txt
 boto3
+# launcher/cdk/requirements.txt provides aws-cdk-lib (import aws_cdk) for bootstrap/install.py synth

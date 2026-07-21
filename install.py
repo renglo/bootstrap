@@ -12,7 +12,8 @@ Workflow:
            aws cloudformation deploy ... (templates at output/<env>/ root), or
            cdk deploy from output/<env>/cdk/
            python bootstrap/upload_seed_image.py ... (between stack-a and stack-b)
-    5. OIDC CI/CD reads bootstrap config from SSM Parameter Store
+    5. python bootstrap/install.py write-state --env-name <env> --aws-profile <profile>
+    6. OIDC CI/CD reads bootstrap config from SSM Parameter Store
 """
 
 from __future__ import annotations
@@ -58,8 +59,15 @@ def _bootstrap_python() -> str:
 
 
 def _ensure_bootstrap_python() -> None:
+    """Re-exec using bootstrap/venv so CDK runs app.py with venv site-packages.
+
+    Do not compare sys.executable paths with resolve(): on macOS, venv/bin/python
+    is a symlink to the same Homebrew binary as python3.12, so resolve() matches
+    even when the venv is not active and aws_cdk is missing.
+    """
     bootstrap_py = _bootstrap_python()
-    if Path(sys.executable).resolve() != Path(bootstrap_py).resolve():
+    venv_root = _BOOTSTRAP_VENV.resolve()
+    if Path(sys.prefix).resolve() != venv_root:
         os.execv(bootstrap_py, [bootstrap_py, *sys.argv])
 
 
@@ -258,7 +266,9 @@ def cmd_synth(extension_path: str | None) -> None:
     print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
     print(f"  cd {cdk_dir}")
     print(f'  cdk deploy {stack_b} --app "python app.py" --output .')
-    print("\nAfter stack-b deploy, bootstrap config is in SSM:")
+    print("\nAfter stack-b deploy, write bootstrap config to SSM:")
+    print(f"  python bootstrap/install.py write-state --env-name {env_name} --aws-profile <profile>")
+    print("\nSSM paths written by write-state:")
     print(f"  /{env_name}/bootstrap/platform-vars/production")
     print(f"  /{env_name}/bootstrap/platform-vars/staging")
     print(f"  /{env_name}/bootstrap/deploy-input")
@@ -282,6 +292,23 @@ def main() -> None:
         help="Extension repo folder under workspace root (default: extension_path in customer-config.json)",
     )
 
+    p_write = sub.add_parser(
+        "write-state",
+        help="Write bootstrap SSM parameters from deployed stack-a/stack-b outputs",
+    )
+    p_write.add_argument("--env-name", required=True, help="Environment name (e.g. productora0719)")
+    p_write.add_argument("--aws-profile", default=None, help="AWS CLI profile name")
+    p_write.add_argument(
+        "--aws-region",
+        default=None,
+        help="AWS region (default: aws_region from customer-config.json)",
+    )
+    p_write.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions without writing to SSM",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -292,6 +319,15 @@ def main() -> None:
 
     if args.command == "synth":
         cmd_synth(args.extension_path)
+    elif args.command == "write-state":
+        from write_state import run_write_state
+
+        run_write_state(
+            env_name=args.env_name.strip(),
+            aws_profile=args.aws_profile,
+            aws_region=args.aws_region,
+            dry_run=args.dry_run,
+        )
     else:
         parser.print_help()
         sys.exit(1)

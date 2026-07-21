@@ -4,3 +4,58 @@ venv/
 # Per-environment CDK synth output (bootstrap/install.py synth)
 output/*
 !output/.gitignore
+
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+*.pyc
+
+# Local deploy / SSM fetch (may contain secrets after --merge-secret)
+deploy_input.json
+lambda_env_merge.json
+build_creds_matrix.json
+ping_response.json
+
+# Repo checkouts (CI and local docker/console builds)
+dev/
+extensions/
+console/
+
+# Handlers workflow local state
+**/state/
+
+# Node (console checkout)
+node_modules/
+
+# Docker
+.docker/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Deployment artifacts
+*.zip
+lambda-deployment.zip
+

@@ -1,60 +1,121 @@
 # Bootstrap — environment installation (CDK + CloudFormation)
 
-Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL). For a copy-paste CloudFormation flow, see [Appendix: CloudFormation deploy](#appendix-cloudformation-deploy-full-script).
+Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL). For a copy-paste CloudFormation flow, see [Appendix: CloudFormation deploy](#appendix-cloudformation-deploy-full-script). For platform-only install without an extension or ECS/EC2 handlers, see [Appendix: Minimum Renglo setup](#appendix-minimum-renglo-setup-no-external-handlers).
 
 ---
 
 ## Local requirements
 
 - AWS CLI configured (`aws configure list-profiles`)
-- Python 3.12
+- **Python 3.12 installed on this machine** (see [§2](#2-virtualenvs) — do not copy `bootstrap/venv` from another computer or OS)
 - Node.js + CDK CLI (`npm install -g aws-cdk`) — only if using `cdk deploy`
 - Docker (for the backend seed image)
 - Git
 - GitHub CLI `gh` (only for uploading vars/secrets to GitHub Environments)
 
+**macOS:** install Python 3.12 if needed, then create the bootstrap venv locally:
+
+```bash
+brew install python@3.12
+python3.12 --version
+```
+
 ---
 
 ## 1. Clone repos
 
-Expected workspace layout:
-
-```text
-<infra-installer>/
-  bootstrap/
-  launcher/
-  extensions-service/
-  extension-repo/          # or another handlers repo (optional, per extension)
-```
+Create a workspace folder in your computer and clone the repositories
 
 ```bash
-cd <infra-installer>
-
-# If you do not have the infra-installer monorepo yet:
-# git clone <infra-installer-url> .
-# git clone <launcher-url> launcher
-# git clone <extensions-service-url> extensions-service
+mkdir infra-installer && cd infra-installer
+git clone https://github.com/renglo/bootstrap.git bootstrap
+git clone https://github.com/renglo/launcher.git launcher
+git clone https://github.com/renglo/extensions-service.git extensions-service
 ```
+
+You can use any other name instead of infra-installer for your workspace folder.
 
 ---
 
 ## 2. Virtualenvs
 
-Idempotent — run once (or when `requirements.txt` changes):
+Run from the **workspace root** (the folder that contains `bootstrap/`, `launcher/`, and `extensions-service/` — e.g. `ops/`).
+
+**Do not copy `bootstrap/venv` from another machine.** A venv is tied to the OS and Python path where it was created. A Windows venv (`Scripts/python.exe`, `home = C:\...` in `pyvenv.cfg`) will not work on macOS, which expects `bootstrap/venv/bin/python`.
+
+### macOS / Linux (recommended)
+
+**Prerequisite:** Python 3.12 available on this machine (`python3.12 --version`).
 
 ```bash
-cd <infra-installer>
+cd <workspace>   # e.g. ops/
+
+# Remove a stale or copied venv (safe if you have not installed deps yet)
+rm -rf bootstrap/venv
+
+# 1. Create the venv on this machine
+python3.12 -m venv bootstrap/venv
+
+# 2. Install bootstrap dependencies into that venv
 bash bootstrap/setup-venvs.sh
 ```
 
-Installs `bootstrap/venv` (boto3 + CDK). `install.py` automatically re-execs with that Python.
+If `python3.12` is not on your PATH, use Homebrew’s binary explicitly:
+
+```bash
+/opt/homebrew/bin/python3.12 -m venv bootstrap/venv
+bash bootstrap/setup-venvs.sh --python /opt/homebrew/bin/python3.12
+```
+
+Verify:
+
+```bash
+bootstrap/venv/bin/python --version
+bootstrap/venv/bin/python -c "import aws_cdk; print('aws_cdk OK')"
+bootstrap/venv/bin/pip list
+```
+
+You should see Python 3.12.x, `aws-cdk-lib`, and other packages from `bootstrap/requirements.txt` (which includes `launcher/cdk/requirements.txt`).
+
+### Alternative (script creates the venv)
+
+If `bootstrap/venv` does **not** exist yet, `setup-venvs.sh` can create it for you:
+
+```bash
+cd <workspace>
+rm -rf bootstrap/venv   # only if replacing a broken/copied venv
+bash bootstrap/setup-venvs.sh --python python3.12
+```
+
+Idempotent — safe to re-run after `requirements.txt` changes (upgrades pip and reinstalls deps).
+
+Optional: install launcher and extensions-service venvs too:
+
+```bash
+bash bootstrap/setup-venvs.sh --all --python python3.12
+```
+
+### Troubleshooting: `venv python not found` / `No module named 'aws_cdk'`
+
+Usually means `bootstrap/venv` exists but is from the wrong OS, is broken, or deps were not installed:
+
+```bash
+grep ^home= bootstrap/venv/pyvenv.cfg   # C:\... → Windows venv; remove it
+ls bootstrap/venv/bin/python            # should exist on macOS
+rm -rf bootstrap/venv
+python3.12 -m venv bootstrap/venv
+bash bootstrap/setup-venvs.sh
+bootstrap/venv/bin/python -c "import aws_cdk"
+```
+
+`setup-venvs.sh` recreates Windows venvs on macOS automatically and verifies `aws_cdk` after install.
 
 ---
 
 ## 3. Configure the environment
 
 ```bash
-cd <infra-installer>/launcher/cdk
+cd launcher/cdk
 cp customer-config.example.json customer-config.json
 # Edit customer-config.json: env_name, aws_account, aws_region, github_repo, compute_type, etc.
 ```
@@ -74,10 +135,20 @@ Platform-wide defaults (`architecture`, backend seed image URI/tag): `launcher/c
 
 ## 4. Generate CloudFormation templates
 
+From the workspace root (`ops/`). You do **not** need to `source activate` the venv — `install.py` re-execs into `bootstrap/venv` automatically (macOS Homebrew `python3.12` is fine):
+
 ```bash
-cd <infra-installer>
-python bootstrap/install.py synth
+cd <infra-installer>   # e.g. ops/
+python3.12 bootstrap/install.py synth
 ```
+
+Equivalent (calls the venv directly):
+
+```bash
+bootstrap/venv/bin/python bootstrap/install.py synth
+```
+
+Requires the **CDK CLI** on your PATH (`npm install -g aws-cdk`) in addition to the Python `aws-cdk-lib` package in the venv.
 
 Output: `bootstrap/output/<env>/`
 
@@ -113,6 +184,7 @@ export AWS_REGION=<aws-region>
 
 # Stack A — pass CreateGitHubOIDC=true only if the account lacks
 # token.actions.githubusercontent.com as an IAM OIDC provider.
+# You can run 'aws iam list-open-id-connect-providers' to check if there is one already
 aws cloudformation deploy \
   --template-file "${ENV}-stack-a.template.json" \
   --stack-name "${ENV}-stack-a" \
@@ -187,9 +259,29 @@ cdk deploy "$ENV-stack-b" \
 
 ---
 
-## 6. Bootstrap config in SSM (automatic on stack-b)
+## 6. Bootstrap config in SSM (write-state after stack-b)
 
-Stack-b writes bootstrap config to **SSM Parameter Store** and uploads blueprints to DynamoDB (custom resource). No post-deploy script is required.
+CloudFormation stacks do **not** write bootstrap JSON to Parameter Store. After stack-b succeeds, run **write-state** once (idempotent — safe to re-run after stack updates):
+
+```bash
+cd <infra-installer>   # e.g. ops/
+
+python bootstrap/install.py write-state \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+```
+
+Or with the venv python:
+
+```bash
+bootstrap/venv/bin/python bootstrap/install.py write-state \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+```
+
+Use `--dry-run` to preview without writing.
 
 | SSM parameter | Purpose | OIDC reader |
 |---------------|---------|-------------|
@@ -204,7 +296,7 @@ Each JSON envelope has `GITHUB_REPOSITORY`, `ENVIRONMENT`, `VARS`, and `SECRETS`
 
 `ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS` are **not** inside the JSON envelopes (CloudFormation `Fn::If` tokens cannot be serialized with `Fn::to_json_string`). CI/CD must read the three `ecs-*` parameters and merge them into runtime `VARS` as `ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS`.
 
-**Verify after stack-b:**
+**Verify after write-state:**
 
 ```bash
 aws ssm get-parameter \
@@ -260,10 +352,11 @@ ECS_SG=$(aws ssm get-parameter --name "/${ENV}/bootstrap/ecs-security-groups" --
 ## Flow summary
 
 ```text
-setup-venvs
+python3.12 -m venv bootstrap/venv  (on this machine — do not copy venv/)
+  → bash bootstrap/setup-venvs.sh
   → customer-config.json
   → synth  →  bootstrap/output/<env>/  (templates + state at root; cdk/ for CDK deploy)
-  → deploy stack-a → bootstrap/upload_seed_image.py → deploy stack-b
+  → deploy stack-a → bootstrap/upload_seed_image.py → deploy stack-b → write-state
   → CI/CD (GitHub Actions via OIDC reads SSM, deploys images to ECR/Lambda)
 ```
 
@@ -403,6 +496,185 @@ To use an existing VPC and subnets for handlers EC2 capacity (when `compute_type
 ```
 
 `ExistingSubnetIds` must belong to `ExistingVpcId` and should span at least two Availability Zones.
+
+---
+
+## Appendix: Minimum Renglo setup (no external handlers)
+
+Use this path when you only need the **Renglo platform** — backend API, Cognito, DynamoDB, and a handlers Lambda — without an extension repo (e.g. Arbitium) and without ECS/EC2 **external handler** capacity.
+
+### What you get
+
+| Included | Not included |
+|----------|--------------|
+| Stack A: Cognito, S3, DynamoDB, backend ECR, tenant IAM, CodeDeploy, releases OIDC | Extension S3 buckets and IAM (`actions_tt_policy`, threat-events bucket, …) |
+| Stack B: backend Lambda + REST/WebSocket API Gateway | Extension blueprints in DynamoDB |
+| Handlers Lambda (`{env}-handlers`) with seed stub + handlers IAM + handlers OIDC | ECS cluster, handlers ECR, results bucket, EC2 ASG |
+| SSM bootstrap config (`platform-vars/*`, `deploy-input`) | `/{env}/bootstrap/ecs-*` parameters |
+| | `EXTERNAL_HANDLERS_ECS_HANDLERS` routing to ECS tasks |
+
+Handlers run in **Lambda only** (`compute_type: lambda_only`). There is no separate extension handlers repo to clone and no ECS task dispatch for heavy extension workloads.
+
+### Repos to clone
+
+Only the three platform repos — **do not** clone an extension folder:
+
+```bash
+mkdir infra-installer && cd infra-installer
+git clone https://github.com/renglo/bootstrap.git bootstrap
+git clone https://github.com/renglo/launcher.git launcher
+git clone https://github.com/renglo/extensions-service.git extensions-service
+```
+
+`extensions-service` is still required: CDK synth imports `compute_stack.py` from it to define the handlers Lambda and OIDC roles.
+
+### `customer-config.json`
+
+Copy the example and use a **minimal** config — omit `extension_path` and set `compute_type` to `lambda_only`:
+
+```bash
+cd launcher/cdk
+cp customer-config.example.json customer-config.json
+```
+
+Example (`launcher/cdk/customer-config.json`):
+
+```json
+{
+  "env_name": "myenv",
+  "aws_account": "123456789012",
+  "aws_region": "us-east-1",
+  "github_repo": "MyOrg/my-releases-repo",
+  "enable_staging": false,
+  "compute_type": "lambda_only"
+}
+```
+
+Notes:
+
+- **`extension_path`** — leave out (or set to `""`). Stack B will not create extension resources and synth will not emit `extension-state.json` or `extension-blueprints/`.
+- **`github_handlers_repo`** — optional. Defaults to `github_repo` when omitted. Use one repo for both backend and handlers CI, or set a separate handlers repo if you prefer.
+- **`enable_staging`** — set `false` for a single production stage (fewer Lambdas, APIs, and OIDC roles). Keep `true` if you want staging parity with production.
+- **`ec2_*` fields** — not used with `lambda_only`; omit them.
+
+### Install flow
+
+Follow the main guide ([§1–§6](#1-clone-repos)) with the config above. Summary:
+
+```bash
+# 1. Python 3.12 + bootstrap venv on this machine (once)
+cd <infra-installer>   # workspace root, e.g. ops/
+rm -rf bootstrap/venv  # if copied from Windows or another machine
+python3.12 -m venv bootstrap/venv
+bash bootstrap/setup-venvs.sh
+
+# 2. Edit launcher/cdk/customer-config.json (see example above)
+
+# 3. Synth (uses bootstrap/venv automatically — no need to activate)
+python3.12 bootstrap/install.py synth
+# Output: bootstrap/output/<env>/  (no extension-blueprints/)
+
+#4 PRE-CONDITION. If this is the first time running CDK in this AWS account and Region you need to bootstrap it
+
+
+export AWS_PROFILE=<your-profile>
+export AWS_REGION=us-east-1
+export AWS_ACCOUNT=<your-aws-account>
+
+cdk bootstrap aws://${AWS_ACCOUNT}/${AWS_REGION} --profile "$AWS_PROFILE"
+
+# 4. Deploy — same order as the full setup: stack-a → seed → stack-b
+# You need to have the de
+export ENV=<env>
+export AWS_PROFILE=<aws-profile>
+export AWS_REGION=<aws-region>
+
+cd bootstrap/output/${ENV}
+aws cloudformation deploy \
+  --template-file "${ENV}-stack-a.template.json" \
+  --stack-name "${ENV}-stack-a" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+# You need to have the Docker installed in your computer and the Docker daemon running
+cd <infra-installer>
+python bootstrap/upload_seed_image.py \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+
+cd bootstrap/output/${ENV}
+aws cloudformation deploy \
+  --template-file "${ENV}-stack-b.template.json" \
+  --stack-name "${ENV}-stack-b" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+cd <infra-installer>
+python bootstrap/install.py write-state \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+
+
+First deploy in a new AWS account: add `--parameter-overrides CreateGitHubOIDC=true` to the stack-a command (see [§5a](#5a-cloudformation-cli-recommended)).
+
+Stack-b is smaller than an extension + EC2 setup; `--s3-bucket` is usually unnecessary unless the template exceeds the CLI size limit.
+
+### Post-deploy and CI/CD
+
+This section is about GitHub Actions in the releases repo. AWS bootstrap already created the IAM roles and SSM parameters; GitHub runs the workflows that assume those roles and deploy.
+
+In this repo the workflows are already written under ops/productora-releases/.git/workflows. You mainly publish that folder to GitHub and wire it to your AWS env — you don't need to author YAML from scratch unless you're forking the pipeline.
+
+Run **write-state** after stack-b ([§6](#6-bootstrap-config-in-ssm-write-state-after-stack-b)) to populate SSM.
+
+Configure GitHub Actions in your **releases** repo to:
+
+1. Assume `GitHubActionsDeployRole-{env}-production` (and staging if enabled).
+2. Read `/{env}/bootstrap/platform-vars/production` from SSM.
+3. Build and deploy the backend image to ECR and Lambda via CodeDeploy.
+
+If you deploy handlers code separately, configure the **handlers** repo (or the same repo) to:
+
+1. Assume `GitHubActionsHandlersRole-{env}-production`.
+2. Read `/{env}/bootstrap/deploy-input` from SSM.
+3. Build a Lambda zip and update `{env}-handlers` (no ECR push or ECS task definition).
+
+With `lambda_only`, skip ECS network merge — there are no `/{env}/bootstrap/ecs-*` parameters ([§6](#6-bootstrap-config-in-ssm-write-state-after-stack-b)).
+
+Verify SSM after write-state:
+
+```bash
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/platform-vars/production" \
+  --query Parameter.Value \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" | jq '.VARS | {BASE_URL, LAMBDA_EXTERNAL_HANDLERS_ARN, ECS_CLUSTER}'
+
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/deploy-input" \
+  --query Parameter.Value \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" | jq '.VARS | {LAMBDA_HANDLERS_FUNCTION_NAME, ECR_IMAGE_URI, ECS_CLUSTER}'
+```
+
+Expect `ECS_CLUSTER` and `ECR_IMAGE_URI` to be empty; `LAMBDA_HANDLERS_FUNCTION_NAME` should be `{env}-handlers`.
+
+### Adding an extension later
+
+When you need external handlers (extension-specific IAM, blueprints, ECS/EC2 capacity):
+
+1. Clone the extension repo as a sibling folder (e.g. `arbitiumlab`).
+2. Add `"extension_path": "arbitiumlab"` and set `"compute_type"` to `fargate` or `ec2` in `customer-config.json`.
+3. Set `"github_handlers_repo"` to the extension/handlers repo if it differs from `github_repo`.
+4. Re-run `python bootstrap/install.py synth` and update stack-b (see [§5](#5-deploy-stacks-to-aws)).
+
+Extension resources are scoped per environment; stack-a does not need to be redeployed unless platform settings change.
 
 ---
 
