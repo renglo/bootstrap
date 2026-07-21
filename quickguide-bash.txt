@@ -1,0 +1,83 @@
+# Bootstrap quickguide — bash
+# Prerequisites assumed: AWS CLI, Python 3.12, Node+CDK, Docker, Git
+# Paste into an empty folder (creates infra-installer/ and runs from there).
+
+# --- Vars (edit these) ---
+ENV="<env>"
+AWS_PROFILE="<aws-profile>"
+AWS_REGION="us-east-1"
+ACCOUNT="<aws-account>"
+REPO="<Org/releases-repo>"
+EXTENSION_REPO="https://github.com/<Org>/<extension-repo>"
+EXTENSION_PATH="<extension-repo>"
+py="./bootstrap/venv/bin/python"
+
+# --- 1. Clone repos ---
+mkdir -p infra-installer
+cd infra-installer
+
+git clone https://github.com/renglo/bootstrap
+git clone https://github.com/renglo/launcher
+git clone https://github.com/renglo/extensions-service
+git clone "$EXTENSION_REPO"
+
+# --- 2. Virtualenvs ---
+bash bootstrap/setup-venvs.sh
+
+# --- 3. customer-config.json ---
+cd launcher/cdk
+cat > customer-config.json <<EOF
+{
+    "env_name": "${ENV}",
+    "aws_account": "${ACCOUNT}",
+    "aws_region": "${AWS_REGION}",
+    "github_repo": "${REPO}",
+    "extension_path": "${EXTENSION_PATH}",
+    "enable_staging": true,
+    "compute_type": "ec2",
+    "ec2_instance_type": "t3.xlarge",
+    "ec2_min_instances": 1,
+    "ec2_desired_instances": 1,
+    "ec2_max_instances": 1
+}
+EOF
+cd ../..
+
+# --- 4. Synth ---
+"$py" bootstrap/install.py synth
+
+# --- 5. Deploy stack-a (CDK) ---
+cd "bootstrap/output/${ENV}/cdk"
+
+cdk deploy "${ENV}-stack-a" \
+  --app "python app.py" \
+  --output . \
+  --require-approval never \
+  --profile "$AWS_PROFILE"
+
+# If new account (no token.actions.githubusercontent.com OIDC), add:
+#   --parameters CreateGitHubOIDC=true
+
+# --- 6. Seed image ---
+cd ../../../..
+"$py" bootstrap/upload_seed_image.py \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+
+# --- 7. Deploy stack-b (CDK) ---
+cd "bootstrap/output/${ENV}/cdk"
+
+cdk deploy "${ENV}-stack-b" \
+  --app "python app.py" \
+  --output . \
+  --exclusively \
+  --require-approval never \
+  --profile "$AWS_PROFILE"
+
+# Optional (compute_type=ec2, use existing VPC):
+#   --parameters HandlersNetworkMode=existing ExistingVpcId=vpc-xxx ExistingSubnetIds=subnet-aaa,subnet-bbb
+
+# --- Verify SSM (optional) ---
+# aws ssm get-parameter --name "/${ENV}/bootstrap/platform-vars/production" \
+#   --query Parameter.Value --output text --profile "$AWS_PROFILE" --region "$AWS_REGION"
