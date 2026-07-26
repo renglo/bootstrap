@@ -1,6 +1,6 @@
 """Write bootstrap SSM parameters from CloudFormation stack outputs.
 
-Run after stack-a, seed image, and stack-b are deployed:
+Run after stack-a (builds ECR :seed tag automatically) and stack-b are deployed:
 
     python bootstrap/install.py write-state \\
         --env-name productora0719 \\

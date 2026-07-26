@@ -11,7 +11,7 @@ Workflow:
     4. Customer deploys:
            aws cloudformation deploy ... (templates at output/<env>/ root), or
            cdk deploy from output/<env>/cdk/
-           python bootstrap/upload_seed_image.py ... (between stack-a and stack-b)
+           (stack-a builds the seed image automatically; no manual step before stack-b)
     5. python bootstrap/install.py write-state --env-name <env> --aws-profile <profile>
     6. OIDC CI/CD reads bootstrap config from SSM Parameter Store
 """
@@ -252,20 +252,18 @@ def cmd_synth(extension_path: str | None) -> None:
         for t in templates:
             print(f"  {t.name}")
     print(f"\nCDK deploy package: {cdk_dir}")
+    print("\nStack-a builds and pushes the seed image automatically (CodeBuild custom resource).")
+    print("No manual step is required between stack-a and stack-b.")
     print("\nDeploy with CloudFormation CLI (from env root):")
     print(f"  cd {env_root}")
     print(f"  aws cloudformation deploy --template-file {stack_a}.template.json ...")
-    print(f"  cd <infra-installer>")
-    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
-    print(f"  cd {env_root}")
     print(f"  aws cloudformation deploy --template-file {stack_b}.template.json ...")
     print("\nDeploy with CDK CLI (from cdk/):")
     print(f"  cd {cdk_dir}")
     print(f'  cdk deploy {stack_a} --app "python app.py" --output . [--parameters CreateGitHubOIDC=true]')
-    print(f"  cd <infra-installer>")
-    print(f"  python bootstrap/upload_seed_image.py --env-name {env_name} --aws-profile <profile>")
-    print(f"  cd {cdk_dir}")
     print(f'  cdk deploy {stack_b} --app "python app.py" --output .')
+    print(f"\n  # Manual rebuild of the seed image (optional):")
+    print(f"  aws codebuild start-build --project-name {env_name}-seed-image ...")
     print("\nAfter stack-b deploy, write bootstrap config to SSM:")
     print(f"  python bootstrap/install.py write-state --env-name {env_name} --aws-profile <profile>")
     print("\nSSM paths written by write-state:")

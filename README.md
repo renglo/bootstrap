@@ -9,7 +9,6 @@ Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL). For a 
 - AWS CLI configured (`aws configure list-profiles`)
 - **Python 3.12 installed on this machine** (see [§2](#2-virtualenvs) — do not copy `bootstrap/venv` from another computer or OS)
 - Node.js + CDK CLI (`npm install -g aws-cdk`) — only if using `cdk deploy`
-- Docker (for the backend seed image)
 - Git
 - GitHub CLI `gh` (only for uploading vars/secrets to GitHub Environments)
 
@@ -163,13 +162,13 @@ Output: `bootstrap/output/<env>/`
 - `extension/` — bundled extension infra (when `extension_path` is set)
 - CDK assembly (`manifest.json`, `*.assets.json`, `asset.*/`, …)
 
-Seed image (between stack-a and stack-b): `python bootstrap/upload_seed_image.py` from `<infra-installer>/` (not copied into output).
+Seed image: stack-a builds and pushes it automatically via a CodeBuild custom resource (`SeedCodeBuildProjectName`, typically `<env>-seed-image`). No local Docker and no manual step between stack-a and stack-b.
 
 ---
 
 ## 5. Deploy stacks to AWS
 
-Required order: **stack-a → seed image → stack-b**
+Required order: **stack-a → stack-b** (stack-a builds the seed image automatically during its own deploy).
 
 ### 5a. CloudFormation CLI (recommended)
 
@@ -185,20 +184,14 @@ export AWS_REGION=<aws-region>
 # Stack A — pass CreateGitHubOIDC=true only if the account lacks
 # token.actions.githubusercontent.com as an IAM OIDC provider.
 # You can run 'aws iam list-open-id-connect-providers' to check if there is one already
+# Stack A also builds and pushes the seed image (CodeBuild custom resource);
+# the deploy does not complete until the build succeeds.
 aws cloudformation deploy \
   --template-file "${ENV}-stack-a.template.json" \
   --stack-name "${ENV}-stack-a" \
   --capabilities CAPABILITY_NAMED_IAM \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
-```
-
-```bash
-cd <infra-installer>
-python bootstrap/upload_seed_image.py \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
 ```
 
 ```bash
@@ -212,6 +205,13 @@ aws cloudformation deploy \
   --region "$AWS_REGION"
 ```
 
+To rebuild the seed image manually later (rarely needed):
+
+```bash
+aws codebuild start-build --project-name "${ENV}-seed-image" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+```
+
 ### 5b. CDK CLI (alternative)
 
 From `bootstrap/output/<env>/cdk/`:
@@ -223,19 +223,12 @@ export ENV=<env>
 export AWS_PROFILE=<aws-profile>
 export AWS_REGION=<aws-region>
 
+# Stack A builds the seed image automatically (CodeBuild custom resource).
 cdk deploy "$ENV-stack-a" \
   --app "python app.py" \
   --output . \
   --require-approval never \
   --profile "$AWS_PROFILE"
-```
-
-```bash
-cd <infra-installer>
-python bootstrap/upload_seed_image.py \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
 ```
 
 ```bash
@@ -356,7 +349,7 @@ python3.12 -m venv bootstrap/venv  (on this machine — do not copy venv/)
   → bash bootstrap/setup-venvs.sh
   → customer-config.json
   → synth  →  bootstrap/output/<env>/  (templates + state at root; cdk/ for CDK deploy)
-  → deploy stack-a → bootstrap/upload_seed_image.py → deploy stack-b → write-state
+  → deploy stack-a (builds seed image automatically) → deploy stack-b → write-state
   → CI/CD (GitHub Actions via OIDC reads SSM, deploys images to ECR/Lambda)
 ```
 
@@ -444,19 +437,14 @@ export AWS_REGION=<aws-region>
 cd <infra-installer>/bootstrap/output/${ENV}
 
 # Stack A — add CreateGitHubOIDC=true only if the account lacks the GitHub OIDC provider
+# Stack A also builds and pushes the seed image (CodeBuild custom resource);
+# the deploy does not complete until the build succeeds. No manual step follows.
 aws cloudformation deploy \
   --template-file "${ENV}-stack-a.template.json" \
   --stack-name "${ENV}-stack-a" \
   --capabilities CAPABILITY_NAMED_IAM \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
-
-# Seed image (required before stack-b)
-cd <infra-installer>
-python bootstrap/upload_seed_image.py \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
 
 # Stack B — use the data bucket from stack-a to upload the template (large templates)
 cd <infra-installer>/bootstrap/output/${ENV}
@@ -507,7 +495,7 @@ Use this path when you only need the **Renglo platform** — backend API, Cognit
 
 | Included | Not included |
 |----------|--------------|
-| Stack A: Cognito, S3, DynamoDB, backend ECR, tenant IAM, CodeDeploy, releases OIDC | Extension S3 buckets and IAM (`actions_tt_policy`, threat-events bucket, …) |
+| Stack A: Cognito, S3, DynamoDB, backend ECR, seed CodeBuild, tenant IAM, CodeDeploy, releases OIDC | Extension S3 buckets and IAM (`actions_tt_policy`, threat-events bucket, …) |
 | Stack B: backend Lambda + REST/WebSocket API Gateway | Extension blueprints in DynamoDB |
 | Handlers Lambda (`{env}-handlers`) with seed stub + handlers IAM + handlers OIDC | ECS cluster, handlers ECR, results bucket, EC2 ASG |
 | SSM bootstrap config (`platform-vars/*`, `deploy-input`) | `/{env}/bootstrap/ecs-*` parameters |
@@ -583,26 +571,20 @@ export AWS_ACCOUNT=<your-aws-account>
 
 cdk bootstrap aws://${AWS_ACCOUNT}/${AWS_REGION} --profile "$AWS_PROFILE"
 
-# 4. Deploy — same order as the full setup: stack-a → seed → stack-b
-# You need to have the de
+# 4. Deploy — stack-a → stack-b (stack-a builds the seed image automatically)
 export ENV=<env>
 export AWS_PROFILE=<aws-profile>
 export AWS_REGION=<aws-region>
 
 cd bootstrap/output/${ENV}
+# Stack A builds and pushes the seed image (CodeBuild custom resource);
+# the deploy blocks until the build succeeds.
 aws cloudformation deploy \
   --template-file "${ENV}-stack-a.template.json" \
   --stack-name "${ENV}-stack-a" \
   --capabilities CAPABILITY_NAMED_IAM \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
-
-# You need to have the Docker installed in your computer and the Docker daemon running
-cd <infra-installer>
-python bootstrap/upload_seed_image.py \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
 
 cd bootstrap/output/${ENV}
 aws cloudformation deploy \

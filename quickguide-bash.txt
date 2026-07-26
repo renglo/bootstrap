@@ -1,5 +1,5 @@
 # Bootstrap quickguide — bash
-# Prerequisites assumed: AWS CLI, Python 3.12, Node+CDK, Docker, Git
+# Prerequisites assumed: AWS CLI, Python 3.12, Node+CDK, Git
 # Paste into an empty folder (creates infra-installer/ and runs from there).
 
 # --- Vars (edit these) ---
@@ -58,14 +58,13 @@ cdk deploy "${ENV}-stack-a" \
 # If new account (no token.actions.githubusercontent.com OIDC), add:
 #   --parameters CreateGitHubOIDC=true
 
-# --- 6. Seed image ---
-cd ../../../..
-"$py" bootstrap/upload_seed_image.py \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
+# Note: stack-a builds and pushes the seed image automatically (CodeBuild
+# custom resource). No manual step is needed before stack-b.
+# To rebuild the seed image manually later:
+#   aws codebuild start-build --project-name "${ENV}-seed-image" \
+#     --profile "$AWS_PROFILE" --region "$AWS_REGION"
 
-# --- 7. Deploy stack-b (CDK) ---
+# --- 6. Deploy stack-b (CDK) ---
 cd "bootstrap/output/${ENV}/cdk"
 
 cdk deploy "${ENV}-stack-b" \
