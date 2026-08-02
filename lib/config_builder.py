@@ -128,6 +128,7 @@ def build_launcher_vars(
     compute_outputs: dict[str, MapValue],
     ecs_network: dict[str, MapValue],
     extension_vars: dict[str, MapValue],
+    from_email: MapValue = "",
 ) -> dict[str, MapValue]:
     backend_fn = stage_app.get("fn_name", f"{env_name}-backend-{stage}")
     rest_url = normalize_url(stage_app.get("rest_url", ""))
@@ -142,6 +143,9 @@ def build_launcher_vars(
     base: dict[str, MapValue] = {
         "WL_NAME": env_name,
         "BASE_URL": rest_url,
+        # Invite links and similar console deep-links use the cloud Amplify URL.
+        "FE_BASE_URL": console_url,
+        "FROM_EMAIL": from_email,
         "API_GATEWAY_ARN": api_gateway_arn(aws_region, aws_account, rest_api_id) if rest_api_id else "",
         "LAMBDA_BACKEND_ARN": lambda_arn(aws_region, aws_account, backend_fn),
         "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
@@ -172,7 +176,6 @@ def build_launcher_vars(
         "ECS_CLUSTER": compute_outputs.get("HandlersEcsClusterName", ""),
         "ECS_TASK_DEFINITION": compute_outputs.get("HandlersTaskFamily", ""),
         "ECS_RESULTS_BUCKET": compute_outputs.get("HandlersResultsBucketName", ""),
-        "EXTERNAL_HANDLERS": env_name,
         **ecs_network,
     }
     return merge_vars(base, extension_vars)
@@ -221,7 +224,6 @@ def build_deploy_input_vars(
             "WEBSOCKET_URL": ws_url,
             "LAMBDA_HANDLERS_FUNCTION_NAME": handlers_fn,
             "ECR_IMAGE_URI": ecr_image_uri,
-            "EXTERNAL_HANDLERS": env_name,
             **ecs_network,
         },
         extension_vars,

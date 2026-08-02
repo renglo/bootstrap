@@ -196,6 +196,7 @@ def run_write_state(
     github_handlers_repo = str(cfg.get("github_handlers_repo", github_repo)).strip() or github_repo
     enable_staging = bool(cfg.get("enable_staging", True))
     compute_type = str(cfg.get("compute_type", "fargate")).strip() or "fargate"
+    from_email = str(cfg.get("email_from", "") or "").strip()
 
     stack_a = f"{env_name}-stack-a"
     stack_b = f"{env_name}-stack-b"
@@ -216,6 +217,8 @@ def run_write_state(
     codedeploy_app_name = _require_output(outputs_a, "CodeDeployAppName", stack_name=stack_a)
     amplify_app_id = _require_output(outputs_a, "AmplifyAppId", stack_name=stack_a)
     amplify_default_domain = _require_output(outputs_a, "AmplifyDefaultDomain", stack_name=stack_a)
+    if not from_email:
+        from_email = outputs_a.get("FromEmail", "").strip()
 
     compute_outputs = {
         k: v
@@ -259,6 +262,7 @@ def run_write_state(
             compute_outputs=compute_outputs,
             ecs_network=ecs_network,
             extension_vars=extension_vars,
+            from_email=from_email,
         )
         vars_dict["LAMBDA_FUNCTION_NAME"] = stage_app["fn_name"]
         vars_dict["LAMBDA_ALIAS"] = stage

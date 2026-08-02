@@ -13,7 +13,8 @@ Workflow:
            cdk deploy from output/<env>/cdk/
            (stack-a builds the seed image automatically; no manual step before stack-b)
     5. python bootstrap/install.py write-state --env-name <env> --aws-profile <profile>
-    6. OIDC CI/CD reads bootstrap config from SSM Parameter Store
+    6. python bootstrap/install.py write-local-config --env-name <env> --aws-profile <profile>
+    7. OIDC CI/CD reads bootstrap config from SSM Parameter Store
 """
 
 from __future__ import annotations
@@ -266,6 +267,9 @@ def cmd_synth(extension_path: str | None) -> None:
     print(f"  aws codebuild start-build --project-name {env_name}-seed-image ...")
     print("\nAfter stack-b deploy, write bootstrap config to SSM:")
     print(f"  python bootstrap/install.py write-state --env-name {env_name} --aws-profile <profile>")
+    print("\nGenerate local developer config bundle (share with devs):")
+    print(f"  python bootstrap/install.py write-local-config --env-name {env_name} --aws-profile <profile>")
+    print(f"  → bootstrap/output/{env_name}/local-dev/")
     print("\nSSM paths written by write-state:")
     print(f"  /{env_name}/bootstrap/platform-vars/production")
     print(f"  /{env_name}/bootstrap/platform-vars/staging")
@@ -273,7 +277,8 @@ def cmd_synth(extension_path: str | None) -> None:
     print(f"  /{env_name}/bootstrap/ecs-vpc            (ec2 compute only)")
     print(f"  /{env_name}/bootstrap/ecs-subnets         (ec2 compute only)")
     print(f"  /{env_name}/bootstrap/ecs-security-groups (ec2 compute only)")
-    print("CI/CD reads these parameters via OIDC (merge ecs-* into VARS; see bootstrap/README.md §7).")
+    print("Local next step: python bootstrap/install.py write-local-config --env-name <env> ...")
+    print("CI/CD (optional, cloud only): see bootstrap/README.md §8.")
 
 
 def main() -> None:
@@ -307,6 +312,48 @@ def main() -> None:
         help="Print actions without writing to SSM",
     )
 
+    p_local = sub.add_parser(
+        "write-local-config",
+        help="Generate local dev config files (env_config.py, .env.development) from SSM",
+    )
+    p_local.add_argument("--env-name", required=True, help="Environment name (e.g. stanley0731)")
+    p_local.add_argument("--aws-profile", default=None, help="AWS CLI profile name")
+    p_local.add_argument(
+        "--aws-region",
+        default=None,
+        help="AWS region (default: aws_region from customer-config.json)",
+    )
+    p_local.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory (default: bootstrap/output/<env>/local-dev)",
+    )
+    p_local.add_argument(
+        "--stage",
+        default="production",
+        help="platform-vars stage (default: production)",
+    )
+    p_local.add_argument(
+        "--invite-fe-base-url",
+        default="http://127.0.0.1:5174",
+        help="INVITE_FE_BASE_URL for local invite email links",
+    )
+    p_local.add_argument(
+        "--vite-extensions",
+        default="schd,data,pes",
+        help="VITE_EXTENSIONS value for .env.development",
+    )
+    p_local.add_argument(
+        "--no-preserve-secrets",
+        action="store_true",
+        help="Generate new SECRET_KEY / CSRF_SESSION_KEY even if output files exist",
+    )
+    p_local.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print actions without writing files",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -324,6 +371,23 @@ def main() -> None:
             env_name=args.env_name.strip(),
             aws_profile=args.aws_profile,
             aws_region=args.aws_region,
+            dry_run=args.dry_run,
+        )
+    elif args.command == "write-local-config":
+        from write_local_config import run_write_local_config
+
+        cfg = _load_customer_config()
+        region = (args.aws_region or cfg.get("aws_region") or "us-east-1").strip()
+        output_dir = Path(args.output_dir).resolve() if args.output_dir else None
+        run_write_local_config(
+            env_name=args.env_name.strip(),
+            aws_profile=args.aws_profile,
+            aws_region=region,
+            output_dir=output_dir,
+            stage=args.stage.strip() or "production",
+            invite_fe_base_url=args.invite_fe_base_url.strip(),
+            extensions=args.vite_extensions.strip(),
+            preserve_secrets=not args.no_preserve_secrets,
             dry_run=args.dry_run,
         )
     else:

@@ -2,9 +2,13 @@
 
 Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL).
 
-**Default path:** install the **Renglo platform only** — backend API, Cognito, DynamoDB, S3, and a handlers Lambda (`compute_type: lambda_only`, no extension repo). Most new environments should follow §1–§7 as written.
+**Default path (kick the tires):** install the **Renglo platform only** — Cognito, DynamoDB, S3, SES, and handlers Lambda (`compute_type: lambda_only`) — then run the app **locally**. Follow **§1–§6**, then **[§7 Path B](#path-b--local-development-default--no-cicd)**. No GitHub Actions and no cloud backend deploy.
 
-**Advanced path:** add an external extension and/or ECS/EC2 handler capacity — see [Advanced: extensions and ECS/EC2 handlers](#advanced-extensions-and-ecsec2-handlers). That section lists config changes only; it does not repeat the install steps.
+**Team invite email is required.** Configure SES in [§3.3](#step-33--set-up-application-email-required) before synth; finish invites in §7.
+
+**Cloud production (later):** when you want the hosted API live, use [§7 Path A](#path-a--cloud-go-live-optional-later) and the optional [§8 CI/CD contract](#8-cicd-contract-optional--cloud-production-only).
+
+**Advanced:** extensions and/or ECS/EC2 handlers — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
 
 ---
 
@@ -118,7 +122,9 @@ bootstrap/venv/bin/python -c "import aws_cdk"
 
 ## 3. Configure the environment
 
-Copy the example and edit `launcher/cdk/customer-config.json`:
+
+
+### Step 3.1 — Create `customer-config.json`
 
 ```bash
 cd launcher/cdk
@@ -127,9 +133,43 @@ cp customer-config.example.json customer-config.json
 
 
 
-### Default config (most new environments)
+### Step 3.2 — Set platform fields
 
-Omit `extension_path`. Set `compute_type` to `lambda_only`:
+Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_type: lambda_only` for a standard install:
+
+
+| Field                        | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
+| `aws_account` / `aws_region` | Target AWS account and region                                              |
+| `github_repo`                | **Releases** repo (backend CI via OIDC)                                    |
+| `enable_staging`             | `false` = production only; `true` = production + staging                   |
+| `compute_type`               | `lambda_only` — handlers deploy as a Lambda zip from CI                    |
+
+
+Optional: `github_handlers_repo` defaults to `github_repo` when omitted.
+
+### Step 3.3 — Set up application email (required)
+
+Team invite email is core platform infrastructure — same tier as Cognito and DynamoDB. Cognito **self-signup is disabled**; after the first admin, **every new user arrives via invite email**. You must configure SES **before synth** (stack-a creates the identity during deploy).
+
+**1. Choose a from-address** on a domain or inbox your organization controls (e.g. `noreply@your-app-domain.com`). You do not need a mailbox for no-reply when using domain verification.
+
+**2. Find your Route53 hosted zone** (skip to step 3 if DNS for that domain is not in this AWS account):
+
+```bash
+export AWS_PROFILE=<aws-profile>
+
+aws route53 list-hosted-zones \
+  --profile "$AWS_PROFILE" \
+  --query "HostedZones[].[Name,Id]" --output table
+```
+
+Pick the zone whose name matches the domain of `email_from` (e.g. `your-app-domain.com.` for `noreply@your-app-domain.com`).
+
+**3. Add email fields to** `customer-config.json`**:**
+
+When the domain’s public DNS is in Route53 **in this account** (usual case):
 
 ```json
 {
@@ -138,21 +178,28 @@ Omit `extension_path`. Set `compute_type` to `lambda_only`:
   "aws_region": "us-east-1",
   "github_repo": "MyOrg/my-releases-repo",
   "enable_staging": false,
-  "compute_type": "lambda_only"
+  "compute_type": "lambda_only",
+  "email_from": "noreply@your-app-domain.com",
+  "email_identity_type": "domain",
+  "email_hosted_zone_id": "Z0123456789EXAMPLE"
 }
 ```
 
+Replace `Z0123456789EXAMPLE` with the zone id from step 2. Stack-a creates the SES domain identity and writes DKIM records automatically (`SesDnsMode=route53_auto`).
 
-| Field                        | Purpose                                                                    |
-| ---------------------------- | -------------------------------------------------------------------------- |
-| `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
-| `aws_account` / `aws_region` | Target AWS account and region                                              |
-| `github_repo`                | **Releases** repo (backend CI via OIDC)                                    |
-| `enable_staging`             | `false` = production only; `true` = production + staging Lambdas/APIs      |
-| `compute_type`               | `lambda_only` (default) — handlers run as a Lambda with zip deploy from CI |
+**If DNS is outside this AWS account:** use the same JSON but **omit** `email_hosted_zone_id`. After deploy, copy stack-a outputs `DkimRecord1Name` / `DkimRecord1Value` (and 2, 3) into your DNS provider as CNAME records (`SesDnsMode=manual_dns`).
+
+**If you only have a single inbox** (no DNS control): set `"email_identity_type": "email"`. SES sends a verification link to that inbox during §7.2 (`SesDnsMode=email_inbox`).
 
 
-Optional: `github_handlers_repo` defaults to `github_repo` when omitted. Use one repo for both backend and handlers CI, or set a separate handlers repo.
+| Field                  | Purpose                                                            |
+| ---------------------- | ------------------------------------------------------------------ |
+| `email_from`           | **Required** — SES from-address for team invite email              |
+| `email_identity_type`  | **Required** — `domain` (preferred) or `email`                     |
+| `email_hosted_zone_id` | Route53 zone id when DNS is in this account; omit for external DNS |
+
+
+After stack-b succeeds, follow **[§7](#7-after-bootstrap--make-the-app-usable)** (default Path B: local API — no CI/CD). `write-state` alone does **not** create SES — deploy stack-a first.
 
 ### What the default install creates
 
@@ -160,6 +207,7 @@ Optional: `github_handlers_repo` defaults to `github_repo` when omitted. Use one
 | Included                                                                            | Not included (see [Advanced](#advanced-extensions-and-ecsec2-handlers)) |
 | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Stack A: Cognito, S3, DynamoDB, tenant IAM, releases OIDC, backend ECR + CodeDeploy | Extension S3 buckets and IAM                                            |
+| Stack A: SES domain/email identity + invite from-address (`email_from`)             | Verified personal/work from-addresses unrelated to your app             |
 | Stack A: seed CodeBuild (builds initial backend container image during deploy)      | Extension blueprints in DynamoDB                                        |
 | Stack B: backend Lambda + REST/WebSocket API Gateway                                | ECS cluster, handlers ECR, EC2 ASG                                      |
 | Stack B: handlers Lambda (`{env}-handlers`) + handlers OIDC                         | `/{env}/bootstrap/ecs-*` SSM parameters                                 |
@@ -333,6 +381,8 @@ cdk deploy "${ENV}-stack-b" \
 
 With `compute_type=ec2`, add deploy-time parameters to this command — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
 
+When stack-b finishes, continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)** (Path B by default).
+
 ### Fallback — if `cdk deploy` fails
 
 Use `aws cloudformation deploy` with an S3 bucket (templates exceed the CLI inline size limit).
@@ -388,6 +438,8 @@ aws cloudformation deploy \
   --region "$AWS_REGION"
 ```
 
+When stack-b finishes, continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)** (Path B by default).
+
 ---
 
 
@@ -418,6 +470,17 @@ Use `--dry-run` to preview without writing.
 
 Each JSON envelope has `GITHUB_REPOSITORY`, `ENVIRONMENT`, `VARS`, and `SECRETS` (always `{}`). Application secrets (e.g. `OPENAI_API_KEY`) are **repo secrets** in GitHub, not in SSM.
 
+Relevant `VARS` for invites (after SES is configured and stacks are deployed):
+
+
+| Key                  | Purpose                                                             |
+| -------------------- | ------------------------------------------------------------------- |
+| `FROM_EMAIL`         | SES from-address (`email_from` from customer-config)                |
+| `FE_BASE_URL`        | Cloud console URL (Amplify) — production invite links and CORS      |
+| `INVITE_FE_BASE_URL` | Optional override for invite links only (local dev; not set in SSM) |
+| `BASE_URL`           | API Gateway URL (backend), not the invite link host                 |
+
+
 With `lambda_only`, there are no `ecs-*` parameters — skip ECS network merge in CI.
 
 **Verify after write-state:**
@@ -428,16 +491,230 @@ aws ssm get-parameter \
   --query Parameter.Value \
   --output text \
   --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION"
+  --region "$AWS_REGION" | jq '.VARS | {FROM_EMAIL, FE_BASE_URL, BASE_URL}'
 ```
+
+Continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)** (Step 7.1 repeats `write-state` if you already ran it here — safe to run twice).
 
 ---
 
 
 
-## 7. CI/CD contract
+## 7. After bootstrap — make the app usable
 
-Configure GitHub Actions in your **releases** repo to:
+§1–§6 provision AWS infrastructure only. They do **not** require GitHub Actions. After stack-b, the cloud API is still a seed stub (`seed image ok`); that is fine for local development — you run the real API on your machine.
+
+**Default (every new / test project):** Steps **7.1 → 7.7** below (**Path B**). No CI/CD.
+
+**Later (optional):** [Path A](#path-a--cloud-go-live-optional-later) when you want a hosted production API — that is when [§8 CI/CD](#8-cicd-contract-optional--cloud-production-only) matters.
+
+### Step 7.1 — Write bootstrap config to SSM
+
+```bash
+export ENV=<env>
+export AWS_PROFILE=<aws-profile>
+export AWS_REGION=<aws-region>
+
+cd <workspace>
+
+python3.12 bootstrap/install.py write-state \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+```
+
+Confirm `FROM_EMAIL` and `FE_BASE_URL` are set:
+
+```bash
+aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/platform-vars/production" \
+  --query Parameter.Value \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  | jq '.VARS | {FROM_EMAIL, FE_BASE_URL, BASE_URL, AMPLIFY_CONSOLE_URL}'
+```
+
+
+
+### Step 7.2 — Verify SES (sender + test recipients)
+
+**1. Confirm the sender domain** (from `email_from` — everything after `@`):
+
+```bash
+EMAIL_DOMAIN=your-app-domain.com   # noreply@example.com → example.com
+
+aws ses get-identity-verification-attributes \
+  --identities "$EMAIL_DOMAIN" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+```
+
+Wait until `"VerificationStatus": "Success"`. If status stays `Pending`, check stack-a output `SesDnsMode` and (for external DNS) add the `DkimRecord*` CNAMEs from the stack outputs.
+
+**2. Add verified recipient addresses for development (SES sandbox)**
+
+New AWS accounts start in the **SES sandbox**: you can send from your verified domain, but only **to** addresses you verify first. For Path B (kicking the tires) you do **not** need SES production access — verify each invitee email you will test with:
+
+```bash
+# Replace with the inbox that will receive invite emails during testing
+RECIPIENT=teammate@example.com
+
+aws ses verify-email-identity \
+  --email-address "$RECIPIENT" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+```
+
+The recipient clicks the confirmation link in their inbox. Check status:
+
+```bash
+aws ses get-identity-verification-attributes \
+  --identities "$RECIPIENT" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+```
+
+Repeat for each test address. You can also verify identities in **AWS Console → SES → Identities → Create identity → Email address**.
+
+**Later (cloud production only):** when you need to invite arbitrary users without verifying each inbox, request [SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html). Not required for local Path B.
+
+### Step 7.3 — Generate local developer config bundle
+
+Produces ready-to-copy `env_config.py`, `.env.development`, and `run.sh` from SSM — no manual copy/paste from `jq`. The infrastructure operator shares this folder with application developers (who may be on a different machine).
+
+```bash
+python3.12 bootstrap/install.py write-local-config \
+  --env-name "$ENV" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION"
+```
+
+**Output:** `bootstrap/output/${ENV}/local-dev/`
+
+
+| File               | Developer copies to                               |
+| ------------------ | ------------------------------------------------- |
+| `env_config.py`    | `dev/renglo-api/env_config.py`                    |
+| `run.sh`           | `dev/renglo-api/run.sh`                           |
+| `.env.development` | `console/.env.development`                        |
+| `README.md`        | handoff instructions (do not copy into app repos) |
+
+
+Re-run `write-local-config` after any infrastructure or SSM change (new tables, Cognito IDs, `FROM_EMAIL`, etc.) and send developers an updated bundle. Existing `SECRET_KEY` / `CSRF_SESSION_KEY` in the output file are preserved by default; use `--no-preserve-secrets` to rotate.
+
+### Step 7.4 — Create the first admin user
+
+Cognito **self-signup is disabled**. Create the first operator once (needed for local and cloud). Everyone else joins via team invite.
+
+```bash
+POOL_ID=$(aws cloudformation describe-stacks \
+  --stack-name "${ENV}-stack-a" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+  --output text)
+
+ADMIN_EMAIL="you@your-domain.com"
+aws cognito-idp admin-create-user \
+  --user-pool-id "$POOL_ID" \
+  --username "$ADMIN_EMAIL" \
+  --user-attributes Name=email,Value="${ADMIN_EMAIL}" Name=email_verified,Value=true \
+  --desired-delivery-mediums EMAIL \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+```
+
+Cognito emails a **temporary password** (copy it exactly — the period at the end of the sentence is punctuation, not part of the password).
+
+**First login:** after stack-a redeploy, the Cognito invitation email includes a setup link and subject **“Complete your admin account setup”**. It points at the cloud Amplify console:
+
+```text
+https://production.<amplify-default-domain>/invite?setup=admin&email=<ADMIN_EMAIL>
+```
+
+For **Path B (local dev)** before the console is deployed to Amplify, use the local URL instead:
+
+```text
+http://127.0.0.1:5174/invite?setup=admin&email=<ADMIN_EMAIL>
+```
+
+On that screen the admin enters the temporary password, first and last name, email, and a new password. Cognito attributes and the user entity (`name`, `slot_a`, `email`) are saved before redirect to `/home`.
+
+If they try `/login` with the temporary password instead, they are redirected to the same setup screen.
+
+---
+
+
+
+### Path B — Local development (default — no CI/CD)
+
+**This is the golden path for kicking the tires.** You do **not** configure GitHub Actions, deploy a backend image, or wait for Amplify. The local API talks to cloud Cognito, DynamoDB, and SES using the files from Step 7.3.
+
+#### Step 7.5 — Hand off config to developers
+
+Send `bootstrap/output/${ENV}/local-dev/` (zip or shared drive). Developers copy the three files per `local-dev/README.md`.
+
+#### Step 7.6 — Run local API and console
+
+```bash
+# Developer machine — after copying files from local-dev/
+cd dev/renglo-api && ./run.sh          # terminal 1 — http://127.0.0.1:5001
+
+cd console && npm run dev              # terminal 2 — http://127.0.0.1:5174
+```
+
+Developers need AWS credentials for the profile in `run.sh` (same account/region as bootstrap). Open `http://127.0.0.1:5174/login` and set a new password when Cognito prompts.
+
+#### Step 7.7 — Test team invites (local)
+
+1. Log in at `http://127.0.0.1:5174/login`.
+2. Invite a teammate whose email you verified in Step 7.2 (sandbox recipients).
+3. Invite emails use `INVITE_FE_BASE_URL` from the generated `env_config.py` (default `http://127.0.0.1:5174`). The invitee opens the link on a machine running the local console, or pastes the invite code from the email at `/invite`.
+
+**You are done for local testing.** Stop here unless you need a hosted production API.
+
+---
+
+
+
+### Path A — Cloud go-live (optional, later)
+
+Only when you want the **hosted** API and Amplify console live. Requires GitHub Actions in your releases repo — see **[§8](#8-cicd-contract-optional--cloud-production-only)**. Skip this entire path while developing locally.
+
+#### Step 7.8 — Deploy application code (GitHub Actions)
+
+Stack-b starts the backend Lambda on a **seed image**. CI must build and deploy the real backend and handlers (contract in §8).
+
+1. Configure and run the releases workflow for **production** (and **staging** if enabled).
+2. If handlers use a separate workflow, run it too.
+
+If you re-deploy `<env>-stack-b` later, Lambda code resets to the seed image — re-run the releases pipeline afterward.
+
+#### Step 7.9 — Confirm the cloud API is live
+
+```bash
+BASE_URL=$(aws ssm get-parameter \
+  --name "/${ENV}/bootstrap/platform-vars/production" \
+  --query Parameter.Value \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  | jq -r '.VARS.BASE_URL')
+
+curl -s "${BASE_URL}/"
+```
+
+**Pass:** the response is not exactly `seed image ok`.
+
+#### Step 7.10 — Test team invites (cloud)
+
+Log in at `FE_BASE_URL` (Amplify), invite by email. Production invite links use `FE_BASE_URL` (leave `INVITE_FE_BASE_URL` unset on Lambda). Until you leave the SES sandbox (Step 7.2 “Later”), invite only verified recipient addresses — or request [SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html) when you are ready for real users.
+
+---
+
+
+
+## 8. CI/CD contract (optional — cloud production only)
+
+**Skip this section** for local development (Path B). You only need it when following [Path A](#path-a--cloud-go-live-optional-later).
+
+Stacks already create OIDC deploy roles and write SSM for CI. Configure GitHub Actions in your **releases** repo to:
 
 1. Assume `GitHubActionsDeployRole-{env}-production` (and staging if enabled) via OIDC.
 2. Read `/{env}/bootstrap/platform-vars/production` from SSM.
@@ -484,13 +761,17 @@ For ECS/EC2 handler setups, merge `ecs-*` parameters into runtime `VARS` — see
 ```text
 python3.12 -m venv bootstrap/venv  (on this machine — do not copy venv/)
   → bash bootstrap/setup-venvs.sh
-  → customer-config.json  (lambda_only, no extension_path)
+  → customer-config.json  (§3.2 platform fields + §3.3 required email_from / SES)
   → synth  →  bootstrap/output/<env>/
   → cdk bootstrap  (once per account/region)
   → cdk deploy <env>-stack-a  →  cdk deploy <env>-stack-b
-  → write-state
-  → CI/CD: releases repo pushes backend image (ECR + CodeDeploy);
-           handlers repo pushes Lambda zip (lambda_only)
+  → §7.1 write-state
+  → §7.2 verify SES
+  → §7.3 write-local-config  →  bootstrap/output/<env>/local-dev/
+  → §7.4 admin-create-user
+  → Path B (default): §7.5 handoff → §7.6 run local → §7.7 invites
+       (stop here — no GitHub / no CI/CD)
+  → Path A (optional later): §7.8–7.10 + §8 CI/CD when you want cloud production
 ```
 
 ---
@@ -567,7 +848,7 @@ find . -name "*.sh" -exec sed -i 's/\r$//' {} \;
 
 Use this when you need an **external extension** (extension-specific IAM, blueprints, threat-events bucket) and/or **handlers on ECS/EC2** because the workload does not fit a Lambda zip (large dependencies, long-running tasks).
 
-Everything else stays the same: follow §1–§7, then adjust config and re-deploy stack-b.
+Everything else stays the same: follow §1–§7 (Path B for local), then adjust config and re-deploy stack-b.
 
 ### Config changes
 
