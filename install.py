@@ -166,6 +166,18 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
         shutil.rmtree(stacks_dest)
     shutil.copytree(stacks_src, stacks_dest)
 
+    # Lambda zip sources (e.g. webhook_edge) resolved relative to the packaged tree
+    assets_src = _CDK_DIR / "assets"
+    assets_dest = cdk_dir / "assets"
+    if assets_src.is_dir():
+        if assets_dest.exists():
+            shutil.rmtree(assets_dest)
+        shutil.copytree(
+            assets_src,
+            assets_dest,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+
     extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")

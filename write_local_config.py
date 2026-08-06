@@ -55,7 +55,16 @@ def _existing_secrets(path: Path) -> dict[str, str]:
         return {}
     text = path.read_text(encoding="utf-8")
     out: dict[str, str] = {}
-    for key in ("SECRET_KEY", "CSRF_SESSION_KEY"):
+    for key in (
+        "SECRET_KEY",
+        "CSRF_SESSION_KEY",
+        "RENGLO_INGRESS_SECRET",
+        "OPENAI_API_KEY",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GMAIL_OAUTH_REDIRECT_URI",
+        "OAUTH_STATE_SECRET",
+    ):
         prefix = f"{key} = "
         for line in text.splitlines():
             if line.startswith(prefix):
@@ -64,6 +73,32 @@ def _existing_secrets(path: Path) -> dict[str, str]:
                     out[key] = raw.strip("'\"")
                 break
     return out
+
+
+def _fetch_ingress_secret(
+    vars_block: dict[str, str],
+    *,
+    aws_profile: str | None,
+    aws_region: str,
+) -> str:
+    """Resolve RENGLO_INGRESS_SECRET from Secrets Manager ARN in platform vars."""
+    arn = str(vars_block.get("RENGLO_INGRESS_SECRET_ARN") or "").strip()
+    name = str(vars_block.get("RENGLO_INGRESS_SECRET_NAME") or "").strip()
+    if not arn and not name:
+        return ""
+    try:
+        import boto3
+
+        session_kwargs: dict[str, Any] = {"region_name": aws_region}
+        if aws_profile:
+            session_kwargs["profile_name"] = aws_profile
+        session = boto3.Session(**session_kwargs)
+        client = session.client("secretsmanager")
+        resp = client.get_secret_value(SecretId=arn or name)
+        return str(resp.get("SecretString") or "")
+    except Exception as exc:
+        print(f"Warning: could not fetch RENGLO_INGRESS_SECRET: {exc}")
+        return ""
 
 
 def _resolve_external_handlers(vars_block: dict[str, str]) -> str:
@@ -135,7 +170,7 @@ def _render_env_config(
         f"S3_BUCKET_NAME = {_env_config_str(v('S3_BUCKET_NAME'))}",
         "",
         "# OPEN AI — set locally if needed (not stored in SSM)",
-        "OPENAI_API_KEY = ''",
+        f"OPENAI_API_KEY = {_env_config_str(v('OPENAI_API_KEY'))}",
         "",
         "# WEB SOCKET — local WSS (dev/wss). Uncomment cloud line to test against API Gateway instead.",
         f"# WEBSOCKET_CONNECTIONS = {_env_config_str(cloud_ws_connections)}",
@@ -146,6 +181,21 @@ def _render_env_config(
         "# Comma-separated extension names with external Lambda/ECS handlers (e.g. pes). Empty = in-process.",
         f"EXTERNAL_HANDLERS = {_env_config_str(_resolve_external_handlers(vars_block))}",
         "EXTERNAL_HANDLERS_USE_DEV_DOCKER = ''",
+        "",
+        "# EventBridge → API universal ingress (from Secrets Manager when available)",
+        f"RENGLO_INGRESS_SECRET = {_env_config_str(v('RENGLO_INGRESS_SECRET'))}",
+        f"WEBHOOK_EDGE_BASE_URL = {_env_config_str(v('WEBHOOK_EDGE_BASE_URL'))}",
+        "WHATSAPP_INGRESS_SECRET = ''",
+        "GMAIL_INGRESS_SECRET = ''",
+        "",
+        "# Gmail extension — platform Google OAuth client (not stored in SSM).",
+        "# Create once in GCP; tenants only click Connect.",
+        f"GOOGLE_OAUTH_CLIENT_ID = {_env_config_str(v('GOOGLE_OAUTH_CLIENT_ID'))}",
+        f"GOOGLE_OAUTH_CLIENT_SECRET = {_env_config_str(v('GOOGLE_OAUTH_CLIENT_SECRET'))}",
+        "# Optional override; default is {BASE_URL}/_schd/gmail/oauth_callback",
+        f"GMAIL_OAUTH_REDIRECT_URI = {_env_config_str(v('GMAIL_OAUTH_REDIRECT_URI'))}",
+        "# Optional; falls back to AUTH_SECRET / SECRET_KEY for OAuth state HMAC",
+        f"OAUTH_STATE_SECRET = {_env_config_str(v('OAUTH_STATE_SECRET'))}",
         "",
     ]
     return "\n".join(lines) + "\n"
@@ -176,6 +226,7 @@ def _render_env_development(
             "",
             "VITE_WL_LOGO='/small_logo.jpg'",
             "VITE_WL_LOGIN='/large_logo.jpg'",
+            "VITE_WL_BACKGROUND='/background.png'",
             "",
             "VITE_GOOGLE_MAPS_API_KEY=''",
             "",
@@ -336,6 +387,28 @@ def run_write_local_config(
     existing = _existing_secrets(env_config_path) if preserve_secrets else {}
     secret_key = existing.get("SECRET_KEY") or secrets.token_hex(32)
     csrf_key = existing.get("CSRF_SESSION_KEY") or secrets.token_hex(32)
+
+    ingress_secret = _fetch_ingress_secret(
+        vars_block, aws_profile=aws_profile, aws_region=aws_region
+    )
+    if not ingress_secret and preserve_secrets:
+        ingress_secret = existing.get("RENGLO_INGRESS_SECRET") or ""
+    if ingress_secret:
+        vars_block["RENGLO_INGRESS_SECRET"] = ingress_secret
+
+    # Local-only secrets: keep values across regen; never pulled from SSM.
+    if preserve_secrets:
+        for key in (
+            "OPENAI_API_KEY",
+            "GOOGLE_OAUTH_CLIENT_ID",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+            "GMAIL_OAUTH_REDIRECT_URI",
+            "OAUTH_STATE_SECRET",
+        ):
+            if key not in vars_block or not str(vars_block.get(key) or "").strip():
+                preserved = existing.get(key) or ""
+                if preserved:
+                    vars_block[key] = preserved
 
     files: dict[str, str] = {
         "env_config.py": _render_env_config(

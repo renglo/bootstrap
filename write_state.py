@@ -154,6 +154,40 @@ def _extension_vars(env_name: str, outputs_b: dict[str, str]) -> dict[str, str]:
     return vars_out
 
 
+# Stack B WebhookIngress outputs → platform-vars / env_config keys
+_WEBHOOK_INGRESS_OUTPUT_MAP: dict[str, str] = {
+    "WebhookEdgeBaseUrl": "WEBHOOK_EDGE_BASE_URL",
+    "RengloIngressSecretArn": "RENGLO_INGRESS_SECRET_ARN",
+    "RengloIngressUrl": "RENGLO_INGRESS_URL",
+    "WebhookEdgeFunctionName": "WEBHOOK_EDGE_FUNCTION_NAME",
+}
+
+
+def _webhook_ingress_vars(outputs_b: dict[str, str]) -> dict[str, str]:
+    """Map platform webhook / ingress CFN outputs into launcher VARS."""
+    vars_out: dict[str, str] = {}
+    for output_key, var_key in _WEBHOOK_INGRESS_OUTPUT_MAP.items():
+        value = outputs_b.get(output_key, "").strip()
+        if value:
+            vars_out[var_key] = value
+    # Convenience: secret name for Secrets Manager fetch without parsing ARN
+    secret_arn = vars_out.get("RENGLO_INGRESS_SECRET_ARN", "")
+    if secret_arn and "RENGLO_INGRESS_SECRET_NAME" not in vars_out:
+        # arn:...:secret:name-Suffix → name (strip random suffix after last -)
+        name_part = secret_arn.split(":")[-1]
+        if name_part.endswith("-") is False and "-" in name_part:
+            # Secrets Manager appends 6-char suffix; keep full path-style name if present
+            # e.g. stanley0731/renglo/ingress-secret-NPOl9q → stanley0731/renglo/ingress-secret
+            base, _, maybe_suffix = name_part.rpartition("-")
+            if base and len(maybe_suffix) == 6:
+                vars_out["RENGLO_INGRESS_SECRET_NAME"] = base
+            else:
+                vars_out["RENGLO_INGRESS_SECRET_NAME"] = name_part
+        elif name_part:
+            vars_out["RENGLO_INGRESS_SECRET_NAME"] = name_part
+    return vars_out
+
+
 def _put_parameter(
     ssm,
     name: str,
@@ -225,7 +259,10 @@ def run_write_state(
         for k, v in outputs_b.items()
         if k.startswith("Handlers") or k in {"HandlersEcrRepoUri", "HandlersEcrRepoName"}
     }
-    extension_vars = _extension_vars(env_name, outputs_b)
+    extension_vars = {
+        **_extension_vars(env_name, outputs_b),
+        **_webhook_ingress_vars(outputs_b),
+    }
     ecs_network = build_ecs_network_vars(compute_type=compute_type, network_mode_cfg=None)
 
     print("\nWriting SSM parameters...")
