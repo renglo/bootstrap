@@ -345,7 +345,7 @@ cd console && npm run dev
 - API: `http://127.0.0.1:5001`
 - WSS: `ws://127.0.0.1:8080`
 
-Log in at `/login` (not `/register`). Your operator creates the first Cognito admin via Step 7.4 in the bootstrap README; that admin completes setup at `/invite?setup=admin&email=...` before using `/login`. After that, new people join by team invite.
+Log in at `/login` (not `/register`). Your operator creates the first Cognito admin via Step 7.3 in the bootstrap README; that admin completes setup at `/invite?setup=admin&email=...` before using `/login`. After that, new people join by team invite.
 
 ## Files in this folder
 
