@@ -135,10 +135,11 @@ def _render_env_config(
         f"FROM_EMAIL = {_env_config_str(v('FROM_EMAIL'))}",
         f"AWS_REGION = {_env_config_str(v('AWS_REGION'))}",
         "",
-        "# Crontab/Cronjob",
-        f"API_GATEWAY_ARN = {_env_config_str(v('API_GATEWAY_ARN'))}",
+        "# EventBridge (role used to invoke the ingress API Destination)",
         f"ROLE_ARN = {_env_config_str(v('ROLE_ARN'))}",
-        "SYS_ENV = 'development'",
+        "",
+        "# Local scheduler (dev/ebe). Cloud EventBridge stays on; Schedule UI Local mode talks to ebe.",
+        "EVENTBRIDGE_EMULATOR_URL = 'http://127.0.0.1:5056'",
         "",
         "# DynamoDB",
         f"DYNAMODB_ENTITY_TABLE = {_env_config_str(v('DYNAMODB_ENTITY_TABLE'))}",
@@ -200,8 +201,7 @@ def _render_env_config(
         "# EventBridge → API universal ingress (from Secrets Manager when available)",
         f"RENGLO_INGRESS_SECRET = {_env_config_str(v('RENGLO_INGRESS_SECRET'))}",
         f"WEBHOOK_EDGE_BASE_URL = {_env_config_str(v('WEBHOOK_EDGE_BASE_URL'))}",
-        "WHATSAPP_INGRESS_SECRET = ''",
-        "GMAIL_INGRESS_SECRET = ''",
+        f"RENGLO_INGRESS_DESTINATION = {_env_config_str(v('RENGLO_INGRESS_DESTINATION') or ((v('WL_NAME') or '') + '-renglo-process' if v('WL_NAME') else ''))}",
         "",
         "# Gmail extension — platform Google OAuth client (not stored in SSM).",
         "# Create once in GCP; tenants only click Connect.",
@@ -341,9 +341,23 @@ The copied config files already point at local WSS:
 
 To test against **cloud** WebSockets instead (corner cases), swap the comments: comment the local lines and uncomment the cloud lines in both files.
 
+## 3b. Local EventBridge emulator (ebe)
+
+Scheduled jobs use **EventBridge in the cloud** and **ebe on your laptop** as a parallel local scheduler. They do not replace each other. In the Schedule UI, switch to **Local** to create jobs that only this machine will run (stamped with an automatic machine id). Cloud jobs keep firing via EventBridge. Local run history is written to `dev/ebe/tmp/activity/YYYY-MM-DD.jsonl` — it is not stored in the production Dynamo index or S3 bucket.
+
+**Setup** (once per machine — see also `dev/ebe/README.md`):
+
+```bash
+cd dev/ebe
+./setup_venv.sh
+source run.sh
+```
+
+Leave ebe running on **`127.0.0.1:5056`** while you develop scheduled jobs.
+
 ## 4. Run the app locally
 
-Follow the run steps in the **`renglo-api` README** (local API + console). You need **three** processes:
+Follow the run steps in the **`renglo-api` README** (local API + console). You need **three** processes (four if you use the scheduler):
 
 ```bash
 # Terminal 1 — local WebSocket (WSS)
@@ -354,11 +368,15 @@ cd dev/renglo-api && ./run.sh
 
 # Terminal 3 — console
 cd console && npm run dev
+
+# Terminal 4 (optional) — EventBridge emulator for scheduled jobs
+cd dev/ebe && source run.sh
 ```
 
 - Console: `{invite_fe_base_url}` (team invite links in email also use this URL)
 - API: `http://127.0.0.1:5001`
 - WSS: `ws://127.0.0.1:8080`
+- ebe: `http://127.0.0.1:5056`
 
 Log in at `/login` (not `/register`). Your operator creates the first Cognito admin via Step 7.3 in the bootstrap README; that admin completes setup at `/invite?setup=admin&email=...` before using `/login`. After that, new people join by team invite.
 
