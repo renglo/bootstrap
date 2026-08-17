@@ -209,6 +209,7 @@ After stack-b succeeds, follow **[§7](#7-after-bootstrap--make-the-app-usable)*
 | Stack A: Cognito, S3, DynamoDB, tenant IAM, releases OIDC, backend ECR + CodeDeploy | Extension S3 buckets and IAM                                            |
 | Stack A: SES domain/email identity + invite from-address (`email_from`)             | Verified personal/work from-addresses unrelated to your app             |
 | Stack A: seed CodeBuild (builds initial backend container image during deploy)      | Extension blueprints in DynamoDB                                        |
+| Stack A: AI amenities — S3 Vectors bucket, `rag-kb` index, RAG docs bucket, default Bedrock KB (`KB_ID`) | Extension-declared vector **indexes** (only when `extension_path` is set) |
 | Stack B: backend Lambda + REST/WebSocket API Gateway                                | ECS cluster, handlers ECR, EC2 ASG                                      |
 | Stack B: handlers Lambda (`{env}-handlers`) + handlers OIDC                         | `/{env}/bootstrap/ecs-*` SSM parameters                                 |
 | SSM bootstrap config after write-state                                              | `EXTERNAL_HANDLERS_ECS_HANDLERS` routing to ECS tasks                   |

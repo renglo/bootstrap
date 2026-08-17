@@ -136,6 +136,41 @@ def _stage_app(outputs_b: dict[str, str], stage: str, env_name: str) -> dict[str
     return app
 
 
+_PLATFORM_AI_OUTPUT_KEYS = (
+    "S3_VECTORS_BUCKET",
+    "S3_VECTORS_BUCKET_ARN",
+    "S3_VECTORS_INDEX_RAG_KB",
+    "RAG_DOCS_BUCKET",
+    "RAG_DOCS_PREFIX",
+    "KB_ID",
+    "RAG_DATA_SOURCE_ID",
+    "EMBEDDING_MODEL_ID",
+)
+
+
+def _cfn_output_lookup(outputs: dict[str, str], key: str) -> str:
+    """Resolve a logical env key from CFN outputs.
+
+    CDK/CloudFormation OutputKey is alphanumeric — underscores are stripped —
+    so ``S3_VECTORS_BUCKET`` is emitted as ``S3VECTORSBUCKET``.
+    """
+    for candidate in (key, key.replace("_", "")):
+        value = outputs.get(candidate, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _platform_ai_vars(outputs_a: dict[str, str]) -> dict[str, str]:
+    """Stack A AiStorage amenity outputs → platform-vars."""
+    vars_out: dict[str, str] = {}
+    for key in _PLATFORM_AI_OUTPUT_KEYS:
+        value = _cfn_output_lookup(outputs_a, key)
+        if value:
+            vars_out[key] = value
+    return vars_out
+
+
 def _extension_vars(env_name: str, outputs_b: dict[str, str]) -> dict[str, str]:
     manifest_path = _BOOTSTRAP_DIR / "output" / env_name / "extension-state.json"
     if not manifest_path.is_file():
@@ -148,7 +183,7 @@ def _extension_vars(env_name: str, outputs_b: dict[str, str]) -> dict[str, str]:
             keys.extend(str(k) for k in raw if str(k).strip())
     vars_out: dict[str, str] = {}
     for key in keys:
-        value = outputs_b.get(key, "").strip()
+        value = _cfn_output_lookup(outputs_b, key)
         if value:
             vars_out[key] = value
     return vars_out
@@ -260,6 +295,7 @@ def run_write_state(
         if k.startswith("Handlers") or k in {"HandlersEcrRepoUri", "HandlersEcrRepoName"}
     }
     extension_vars = {
+        **_platform_ai_vars(outputs_a),
         **_extension_vars(env_name, outputs_b),
         **_webhook_ingress_vars(outputs_b),
     }
