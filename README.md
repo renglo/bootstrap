@@ -141,10 +141,11 @@ Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_ty
 | Field                        | Purpose                                                                    |
 | ---------------------------- | -------------------------------------------------------------------------- |
 | `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
-| `aws_account` / `aws_region` | Target AWS account and region                                              |
 | `github_repo`                | **Releases** repo (backend CI via OIDC)                                    |
 | `enable_staging`             | `false` = production only; `true` = production + staging                   |
 | `compute_type`               | `lambda_only` — handlers deploy as a Lambda zip from CI                    |
+
+Account and region are **not** in this file. Choose them at deploy time (`AWS_PROFILE` / `AWS_REGION`). Templates resolve `AWS::AccountId` / `AWS::Region`.
 
 
 Optional: `github_handlers_repo` defaults to `github_repo` when omitted.
@@ -174,8 +175,6 @@ When the domain’s public DNS is in Route53 **in this account** (usual case):
 ```json
 {
   "env_name": "myenv",
-  "aws_account": "123456789012",
-  "aws_region": "us-east-1",
   "github_repo": "MyOrg/my-releases-repo",
   "enable_staging": false,
   "compute_type": "lambda_only",
@@ -907,13 +906,14 @@ Update `launcher/cdk/customer-config.json`:
 ```json
 {
   "env_name": "myenv",
-  "aws_account": "123456789012",
-  "aws_region": "us-east-1",
   "github_repo": "MyOrg/my-releases-repo",
   "github_handlers_repo": "MyOrg/my-handlers-repo",
   "extension_path": "arbitiumlab",
   "enable_staging": true,
-  "compute_type": "fargate"
+  "compute_type": "fargate",
+  "email_from": "noreply@your-app-domain.com",
+  "email_identity_type": "domain",
+  "email_hosted_zone_id": "Z0123456789EXAMPLE"
 }
 ```
 

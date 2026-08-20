@@ -333,7 +333,7 @@ def main() -> None:
     p_local.add_argument(
         "--aws-region",
         default=None,
-        help="AWS region (default: aws_region from customer-config.json)",
+        help="AWS region (default: AWS_REGION / AWS_DEFAULT_REGION / profile region)",
     )
     p_local.add_argument(
         "--output-dir",
@@ -388,13 +388,11 @@ def main() -> None:
     elif args.command == "write-local-config":
         from write_local_config import run_write_local_config
 
-        cfg = _load_customer_config()
-        region = (args.aws_region or cfg.get("aws_region") or "us-east-1").strip()
         output_dir = Path(args.output_dir).resolve() if args.output_dir else None
         run_write_local_config(
             env_name=args.env_name.strip(),
             aws_profile=args.aws_profile,
-            aws_region=region,
+            aws_region=args.aws_region,
             output_dir=output_dir,
             stage=args.stage.strip() or "production",
             invite_fe_base_url=args.invite_fe_base_url.strip(),

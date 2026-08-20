@@ -9,6 +9,9 @@ $AWS_REGION = "us-east-1"   # deploy-time only (CLI / CDK); not in customer-conf
 $REPO = "<Org/releases-repo>"
 $EXTENSION_REPO = "https://github.com/<Org>/<extension-repo>"
 $EXTENSION_PATH = "<extension-repo>"
+$EMAIL_FROM = "noreply@your-app-domain.com"
+$EMAIL_IDENTITY_TYPE = "domain"          # domain | email
+$EMAIL_HOSTED_ZONE_ID = "Z0123456789EXAMPLE"  # omit from JSON if DNS is outside this account
 
 # --- 1. Clone repos ---
 New-Item -ItemType Directory -Force -Path infra-installer | Out-Null
@@ -40,7 +43,10 @@ $cfg = @"
     "ec2_instance_type": "t3.xlarge",
     "ec2_min_instances": 1,
     "ec2_desired_instances": 1,
-    "ec2_max_instances": 1
+    "ec2_max_instances": 1,
+    "email_from": "$EMAIL_FROM",
+    "email_identity_type": "$EMAIL_IDENTITY_TYPE",
+    "email_hosted_zone_id": "$EMAIL_HOSTED_ZONE_ID"
 }
 "@
 Set-Content -Path (Join-Path $Root "launcher\cdk\customer-config.json") -Value $cfg -Encoding utf8

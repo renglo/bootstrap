@@ -395,7 +395,7 @@ def run_write_local_config(
     *,
     env_name: str,
     aws_profile: str | None,
-    aws_region: str,
+    aws_region: str | None = None,
     output_dir: Path | None = None,
     stage: str = "production",
     invite_fe_base_url: str = _DEFAULT_INVITE_FE,
@@ -406,6 +406,9 @@ def run_write_local_config(
     preserve_secrets: bool = True,
     dry_run: bool = False,
 ) -> Path:
+    from write_state import _resolve_aws_region
+
+    aws_region = _resolve_aws_region(aws_profile, aws_region)
     payload = fetch_platform_vars(
         env_name,
         stage,
