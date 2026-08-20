@@ -316,7 +316,7 @@ def main() -> None:
     p_write.add_argument(
         "--aws-region",
         default=None,
-        help="AWS region (default: aws_region from customer-config.json)",
+        help="AWS region (default: AWS_REGION / AWS_DEFAULT_REGION / profile region)",
     )
     p_write.add_argument(
         "--dry-run",

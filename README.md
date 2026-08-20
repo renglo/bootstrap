@@ -217,6 +217,8 @@ After stack-b succeeds, follow **[§7](#7-after-bootstrap--make-the-app-usable)*
 
 **About ECR:** the backend always uses a **container Lambda** (ECR + CodeDeploy) — that replaces the old Zappa zip deploy. You do not configure ECR manually for a new project; stack-a runs a seed build during deploy and CI pushes real images afterward. With `lambda_only`, **handlers** use a zip Lambda (no handlers ECR). Handlers ECR/ECS only apply when you switch to `fargate` or `ec2` for heavy extension workloads.
 
+Templates are **environment-agnostic**: account and region resolve via `AWS::AccountId` / `AWS::Region` at deploy time. Synth does not need (or accept) `aws_account` / `aws_region` in the config.
+
 Platform-wide defaults (`architecture`, backend seed image URI/tag): `launcher/cdk/platform_defaults.json` (copied to `bootstrap/output/<env>/cdk/` on synth).
 
 ---
@@ -946,9 +948,9 @@ When `compute_type=ec2`, pass parameters on stack-b deploy:
 
 ```bash
   --parameter-overrides \
-    HandlersNetworkMode=existing \
-    ExistingVpcId=vpc-0123456789abcdef0 \
-    ExistingSubnetIds=subnet-aaa,subnet-bbb
+    "HandlersNetworkMode=existing" \
+    "ExistingVpcId=vpc-0123456789abcdef0" \
+    "ExistingSubnetIds=subnet-aaa,subnet-bbb"
 ```
 
 Default is `HandlersNetworkMode=create` (dedicated VPC). `ExistingSubnetIds` must belong to `ExistingVpcId` and span at least two Availability Zones.

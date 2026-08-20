@@ -99,6 +99,41 @@ def _ssm_client(aws_profile: str | None, aws_region: str):
     return boto3.Session(region_name=aws_region).client("ssm")
 
 
+def _boto_session(aws_profile: str | None, aws_region: str | None = None):
+    import boto3
+
+    kwargs: dict[str, str] = {}
+    if aws_profile:
+        kwargs["profile_name"] = aws_profile
+    if aws_region:
+        kwargs["region_name"] = aws_region
+    return boto3.Session(**kwargs)
+
+
+def _resolve_aws_region(aws_profile: str | None, aws_region: str | None) -> str:
+    """Region for write-state API calls — CLI, env, or profile default (not customer-config)."""
+    import os
+
+    if aws_region and aws_region.strip():
+        return aws_region.strip()
+    for key in ("AWS_REGION", "AWS_DEFAULT_REGION"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    session = _boto_session(aws_profile)
+    if session.region_name:
+        return session.region_name
+    raise SystemExit(
+        "ERROR: AWS region required. Pass --aws-region or set AWS_REGION / AWS_DEFAULT_REGION."
+    )
+
+
+def _resolve_aws_account(aws_profile: str | None, aws_region: str) -> str:
+    """Account id from STS (deploy-time credentials), not customer-config."""
+    session = _boto_session(aws_profile, aws_region)
+    return str(session.client("sts").get_caller_identity()["Account"])
+
+
 def _stack_outputs(cfn, stack_name: str) -> dict[str, str]:
     resp = cfn.describe_stacks(StackName=stack_name)
     stacks = resp.get("Stacks") or []
@@ -254,10 +289,8 @@ def run_write_state(
     dry_run: bool = False,
 ) -> None:
     cfg = _load_customer_config(env_name)
-    region = (aws_region or str(cfg.get("aws_region", "us-east-1")).strip() or "us-east-1")
-    account = str(cfg.get("aws_account", "")).strip()
-    if not account:
-        raise SystemExit("ERROR: customer-config.json must set aws_account")
+    region = _resolve_aws_region(aws_profile, aws_region)
+    account = _resolve_aws_account(aws_profile, region)
 
     github_repo = str(cfg.get("github_repo", "")).strip()
     if not github_repo:
@@ -273,9 +306,13 @@ def run_write_state(
     cfn = _cfn_client(aws_profile, region)
     ssm = _ssm_client(aws_profile, region)
 
-    print(f"\nReading CloudFormation outputs ({region})...")
+    print(f"\nReading CloudFormation outputs ({region}, account {account})...")
     outputs_a = _stack_outputs(cfn, stack_a)
     outputs_b = _stack_outputs(cfn, stack_b)
+
+    # Prefer resolved stack outputs when present (templates emit AwsAccountId / AwsRegion).
+    account = outputs_a.get("AwsAccountId", "").strip() or account
+    region = outputs_a.get("AwsRegion", "").strip() or region
 
     data_bucket = _require_output(outputs_a, "DataBucketName", stack_name=stack_a)
     cognito_user_pool_id = _require_output(outputs_a, "UserPoolId", stack_name=stack_a)

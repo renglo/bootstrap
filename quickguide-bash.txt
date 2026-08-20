@@ -5,12 +5,10 @@
 # --- Vars (edit these) ---
 ENV="<env>"
 AWS_PROFILE="<aws-profile>"
-AWS_REGION="us-east-1"
-ACCOUNT="<aws-account>"
+AWS_REGION="us-east-1"   # deploy-time only (CLI / CDK); not in customer-config
 REPO="<Org/releases-repo>"
 EXTENSION_REPO="https://github.com/<Org>/<extension-repo>"
 EXTENSION_PATH="<extension-repo>"
-py="./bootstrap/venv/bin/python"
 
 # --- 1. Clone repos ---
 mkdir -p infra-installer
@@ -21,16 +19,20 @@ git clone https://github.com/renglo/launcher
 git clone https://github.com/renglo/extensions-service
 git clone "$EXTENSION_REPO"
 
+# Workspace root — keep all commands here. $py absolute for synth only.
+ROOT="$(pwd)"
+py="${ROOT}/bootstrap/venv/bin/python"
+CdkOut="bootstrap/output/${ENV}/cdk"   # cloud assembly from install.py synth
+
 # --- 2. Virtualenvs ---
 bash bootstrap/setup-venvs.sh
 
 # --- 3. customer-config.json ---
-cd launcher/cdk
-cat > customer-config.json <<EOF
+# Account/region are NOT in this file — templates use AWS::AccountId / AWS::Region.
+# Choose the target with AWS_PROFILE / AWS_REGION at deploy time.
+cat > "${ROOT}/launcher/cdk/customer-config.json" <<EOF
 {
     "env_name": "${ENV}",
-    "aws_account": "${ACCOUNT}",
-    "aws_region": "${AWS_REGION}",
     "github_repo": "${REPO}",
     "extension_path": "${EXTENSION_PATH}",
     "enable_staging": true,
@@ -41,22 +43,22 @@ cat > customer-config.json <<EOF
     "ec2_max_instances": 1
 }
 EOF
-cd ../..
 
-# --- 4. Synth ---
-"$py" bootstrap/install.py synth
+# --- 4. Synth (from workspace root) ---
+"$py" "${ROOT}/bootstrap/install.py" synth
 
-# --- 5. Deploy stack-a (CDK) ---
-cd "bootstrap/output/${ENV}/cdk"
-
+# --- 5. Deploy stack-a (from workspace root) ---
+# --app points at the pre-synthesized cloud assembly (manifest.json), so CDK
+# does not re-run Python and you do not need to cd into $CdkOut.
+# Stack id is just "${ENV}-stack-a" — not a filesystem path.
 cdk deploy "${ENV}-stack-a" \
-  --app "python app.py" \
-  --output . \
+  --app "$CdkOut" \
   --require-approval never \
-  --profile "$AWS_PROFILE"
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
 
 # If new account (no token.actions.githubusercontent.com OIDC), add:
-#   --parameters CreateGitHubOIDC=true
+#   --parameters "CreateGitHubOIDC=true"
 
 # Note: stack-a builds and pushes the seed image automatically (CodeBuild
 # custom resource). No manual step is needed before stack-b.
@@ -64,18 +66,44 @@ cdk deploy "${ENV}-stack-a" \
 #   aws codebuild start-build --project-name "${ENV}-seed-image" \
 #     --profile "$AWS_PROFILE" --region "$AWS_REGION"
 
-# --- 6. Deploy stack-b (CDK) ---
-cd "bootstrap/output/${ENV}/cdk"
-
+# --- 6. Deploy stack-b (from workspace root) ---
+# Default HandlersNetworkMode=create (dedicated VPC). For an existing VPC, see §6b.
 cdk deploy "${ENV}-stack-b" \
-  --app "python app.py" \
-  --output . \
+  --app "$CdkOut" \
   --exclusively \
   --require-approval never \
-  --profile "$AWS_PROFILE"
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
 
-# Optional (compute_type=ec2, use existing VPC):
-#   --parameters HandlersNetworkMode=existing ExistingVpcId=vpc-xxx ExistingSubnetIds=subnet-aaa,subnet-bbb
+# --- 6b. stack-b with existing VPC (compute_type=ec2) ---
+# ExistingSubnetIds is a CloudFormation CommaDelimitedList (native CFN type).
+# Quote each override so shells do not split on commas. Prefer CloudFormation
+# console / CLI when customers set parameters in the UI (see bootstrap/README.md).
+#
+# cdk deploy "${ENV}-stack-b" \
+#   --app "$CdkOut" \
+#   --exclusively \
+#   --require-approval never \
+#   --profile "$AWS_PROFILE" \
+#   --region "$AWS_REGION" \
+#   --parameters \
+#     "HandlersNetworkMode=existing" \
+#     "ExistingVpcId=vpc-0123456789abcdef0" \
+#     "ExistingSubnetIds=subnet-aaa,subnet-bbb,subnet-ccc"
+#
+# CloudFormation CLI (templates at bootstrap/output/${ENV}/):
+# aws cloudformation deploy \
+#   --template-file "bootstrap/output/${ENV}/${ENV}-stack-b.template.json" \
+#   --stack-name "${ENV}-stack-b" \
+#   --capabilities CAPABILITY_NAMED_IAM \
+#   --parameter-overrides \
+#     "HandlersNetworkMode=existing" \
+#     "ExistingVpcId=vpc-0123456789abcdef0" \
+#     "ExistingSubnetIds=subnet-aaa,subnet-bbb,subnet-ccc" \
+#   --profile "$AWS_PROFILE" --region "$AWS_REGION"
+#
+# Console: Create/Update stack → Parameters → HandlersNetworkMode=existing,
+#   ExistingVpcId=vpc-…, ExistingSubnetIds=subnet-aaa,subnet-bbb (one field, commas OK).
 
 # --- Verify SSM (optional) ---
 # aws ssm get-parameter --name "/${ENV}/bootstrap/platform-vars/production" \
