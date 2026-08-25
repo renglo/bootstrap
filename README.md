@@ -141,7 +141,7 @@ Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_ty
 | Field                        | Purpose                                                                    |
 | ---------------------------- | -------------------------------------------------------------------------- |
 | `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
-| `github_repo`                | **Releases** repo (backend CI via OIDC)                                    |
+| `github_repo`                | **BOM** repo (backend CI via OIDC)                                    |
 | `enable_staging`             | `false` = production only; `true` = production + staging                   |
 | `compute_type`               | `lambda_only` — handlers deploy as a Lambda zip from CI                    |
 
@@ -175,7 +175,7 @@ When the domain’s public DNS is in Route53 **in this account** (usual case):
 ```json
 {
   "env_name": "myenv",
-  "github_repo": "MyOrg/my-releases-repo",
+  "github_repo": "MyOrg/my-bom-repo",
   "enable_staging": false,
   "compute_type": "lambda_only",
   "email_from": "noreply@your-app-domain.com",
@@ -464,8 +464,8 @@ Use `--dry-run` to preview without writing.
 
 | SSM parameter                               | Purpose                                        | OIDC reader                                  |
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------- |
-| `/{env}/bootstrap/platform-vars/production` | Releases repo CI — production                  | `GitHubActionsDeployRole-{env}-production`   |
-| `/{env}/bootstrap/platform-vars/staging`    | Releases repo CI — staging (if enabled)        | `GitHubActionsDeployRole-{env}-staging`      |
+| `/{env}/bootstrap/platform-vars/production` | BOM repo CI — production                  | `GitHubActionsDeployRole-{env}-production`   |
+| `/{env}/bootstrap/platform-vars/staging`    | BOM repo CI — staging (if enabled)        | `GitHubActionsDeployRole-{env}-staging`      |
 | `/{env}/bootstrap/deploy-input`             | Handlers repo CI                               | `GitHubActionsHandlersRole-{env}-production` |
 | `/{env}/bootstrap/ecs-*`                    | Handlers EC2 network (`compute_type=ec2` only) | releases + handlers OIDC roles               |
 
@@ -719,7 +719,7 @@ cd console && npm run dev              # terminal 2 — http://127.0.0.1:5174
 
 ### Path A — Cloud go-live (optional, later)
 
-Skip this while you are developing locally. Use it when you want the API and the web console hosted in AWS instead of on a laptop. That needs GitHub Actions in your releases repo — see **[§8](#8-cicd-contract-optional--cloud-production-only)**.
+Skip this while you are developing locally. Use it when you want the API and the web console hosted in AWS instead of on a laptop. That needs GitHub Actions in your BOM repo — see **[§8](#8-cicd-contract-optional--cloud-production-only)**.
 
 #### Step 7.9 — Deploy application code (GitHub Actions)
 
@@ -906,7 +906,7 @@ Update `launcher/cdk/customer-config.json`:
 ```json
 {
   "env_name": "myenv",
-  "github_repo": "MyOrg/my-releases-repo",
+  "github_repo": "MyOrg/my-bom-repo",
   "github_handlers_repo": "MyOrg/my-handlers-repo",
   "extension_path": "arbitiumlab",
   "enable_staging": true,
