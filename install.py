@@ -33,6 +33,7 @@ _BOOTSTRAP_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
 _CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
 _COMPUTE_STACK_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "compute_stack.py"
+_GITHUB_OIDC_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "github_oidc.py"
 _CDK_SUBDIR = "cdk"
 
 _PACKAGE_FILES = (
@@ -147,6 +148,9 @@ def _package_lib(cdk_dir: Path) -> None:
     cdk_lib_src = _CDK_DIR / "lib" / "config_builder.py"
     if cdk_lib_src.is_file():
         shutil.copy2(cdk_lib_src, lib_dest / "config_builder.py")
+    github_oidc_src = _CDK_DIR / "lib" / "github_oidc.py"
+    if github_oidc_src.is_file():
+        shutil.copy2(github_oidc_src, lib_dest / "github_oidc.py")
 
 
 def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
@@ -181,6 +185,8 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
     extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
+    if _GITHUB_OIDC_SRC.is_file():
+        shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
 
     _package_lib(cdk_dir)
     _package_blueprints(cdk_dir, extension_path)

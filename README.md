@@ -150,6 +150,14 @@ Account and region are **not** in this file. Choose them at deploy time (`AWS_PR
 
 Optional: `github_handlers_repo` defaults to `github_repo` when omitted.
 
+#### Optional — GitHub owner / repo IDs (immutable OIDC `sub`)
+
+For IAM trust policies that accept GitHub’s immutable subject format (`repo:ORG@OWNER-ID/REPO@REPO-ID:environment:…`), set `github_owner_id` and `github_repo_id` (and `github_handlers_*` when handlers use a different repo). From the repo directory (or substitute `owner` / `repo`):
+
+```bash
+gh api "repos/{owner}/{repo}" --jq "{owner_id: .owner.id, repo_id: .id}"
+```
+
 ### Step 3.3 — Set up application email (required)
 
 Team invite email is core platform infrastructure — same tier as Cognito and DynamoDB. Cognito **self-signup is disabled**; after the first admin, **every new user arrives via invite email**. You must configure SES **before synth** (stack-a creates the identity during deploy).
