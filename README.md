@@ -142,12 +142,13 @@ Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_ty
 | ---------------------------- | -------------------------------------------------------------------------- |
 | `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
 | `aws_account` / `aws_region` | Target AWS account and region                                              |
-| `github_repo`                | **BOM** repo (backend CI via OIDC)                                    |
+| `github_repo`                | **BOM** repo (`OWNER/REPO`) — SSM and clone identity, not the IAM `sub` |
+| `github_oidc_sub_prefix`     | Optional. Immutable GitHub OIDC prefix (`OWNER@ID/REPO@ID`) from **Settings → Actions → OIDC**. Used for staging **and** production deploy roles. Omit on older repos that still use the name-only `sub` |
 | `enable_staging`             | `false` = production only; `true` = production + staging                   |
 | `compute_type`               | `lambda_only` — handlers deploy as a Lambda zip from CI                    |
 
 
-Optional: `github_handlers_repo` defaults to `github_repo` when omitted.
+Optional: `github_handlers_repo` defaults to `github_repo` when omitted. Optional: `github_handlers_oidc_sub_prefix` when the handlers repo is different and also uses GitHub's immutable OIDC `sub`.
 
 ### Step 3.3 — Set up application email (required)
 
@@ -189,7 +190,7 @@ Replace `Z0123456789EXAMPLE` with the zone id from step 2. Stack-a creates the S
 
 **If DNS is outside this AWS account:** use the same JSON but **omit** `email_hosted_zone_id`. After deploy, copy stack-a outputs `DkimRecord1Name` / `DkimRecord1Value` (and 2, 3) into your DNS provider as CNAME records (`SesDnsMode=manual_dns`).
 
-**If you only have a single inbox** (no DNS control): set `"email_identity_type": "email"`. SES sends a verification link to that inbox during §7.2 (`SesDnsMode=email_inbox`).
+**If you only have a single inbox** (no DNS control): set `"email_identity_type": "email"`. SES sends a verification link to that inbox during [§7.1](#step-71--verify-ses-sender--test-recipients) (`SesDnsMode=email_inbox`).
 
 
 | Field                  | Purpose                                                            |
@@ -247,7 +248,7 @@ Output: `bootstrap/output/<env>/`
 
 `**cdk/**` subfolder (only for `cdk deploy`):
 
-- `app.py`, `stacks/`, `extensions/`, `customer-config.json`, `platform_defaults.json`
+- `app.py`, `stacks/`, `lib/`, `extensions/`, `customer-config.json`, `platform_defaults.json`
 - CDK assembly (`manifest.json`, `*.assets.json`, `asset.*/`, …)
 
 When `extension_path` is set, synth also emits `extension-state.json`, `extension-blueprints/`, and bundled extension infra under `cdk/extension/`.
@@ -491,10 +492,10 @@ aws ssm get-parameter \
   --query Parameter.Value \
   --output text \
   --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" | jq '.VARS | {FROM_EMAIL, FE_BASE_URL, BASE_URL}'
+  --region "$AWS_REGION" | jq '.VARS | {FROM_EMAIL, FE_BASE_URL, BASE_URL, AMPLIFY_CONSOLE_URL}'
 ```
 
-Continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)** (Step 7.1 repeats `write-state` if you already ran it here — safe to run twice).
+Continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)**.
 
 ---
 
@@ -504,40 +505,11 @@ Continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usabl
 
 §1–§6 provision AWS infrastructure only. They do **not** require GitHub Actions. After stack-b, the cloud API is still a seed stub (`seed image ok`); that is fine for local development — you run the real API on your machine.
 
-**Default (every new / test project):** Steps **7.1 → 7.7** below (**Path B**). No CI/CD.
+**Default (every new / test project):** Steps **7.1 → 7.6** below (**Path B**). No CI/CD. (You already ran `write-state` in [§6](#6-bootstrap-config-in-ssm-write-state-after-stack-b).)
 
 **Later (optional):** [Path A](#path-a--cloud-go-live-optional-later) when you want a hosted production API — that is when [§8 CI/CD](#8-cicd-contract-optional--cloud-production-only) matters.
 
-### Step 7.1 — Write bootstrap config to SSM
-
-```bash
-export ENV=<env>
-export AWS_PROFILE=<aws-profile>
-export AWS_REGION=<aws-region>
-
-cd <workspace>
-
-python3.12 bootstrap/install.py write-state \
-  --env-name "$ENV" \
-  --aws-profile "$AWS_PROFILE" \
-  --aws-region "$AWS_REGION"
-```
-
-Confirm `FROM_EMAIL` and `FE_BASE_URL` are set:
-
-```bash
-aws ssm get-parameter \
-  --name "/${ENV}/bootstrap/platform-vars/production" \
-  --query Parameter.Value \
-  --output text \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" \
-  | jq '.VARS | {FROM_EMAIL, FE_BASE_URL, BASE_URL, AMPLIFY_CONSOLE_URL}'
-```
-
-
-
-### Step 7.2 — Verify SES (sender + test recipients)
+### Step 7.1 — Verify SES (sender + test recipients)
 
 **1. Confirm the sender domain** (from `email_from` — everything after `@`):
 
@@ -576,7 +548,7 @@ Repeat for each test address. You can also verify identities in **AWS Console �
 
 **Later (cloud production only):** when you need to invite arbitrary users without verifying each inbox, request [SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html). Not required for local Path B.
 
-### Step 7.3 — Generate local developer config bundle
+### Step 7.2 — Generate local developer config bundle
 
 Produces ready-to-copy `env_config.py`, `.env.development`, and `run.sh` from SSM — no manual copy/paste from `jq`. The infrastructure operator shares this folder with application developers (who may be on a different machine).
 
@@ -600,7 +572,7 @@ python3.12 bootstrap/install.py write-local-config \
 
 Re-run `write-local-config` after any infrastructure or SSM change (new tables, Cognito IDs, `FROM_EMAIL`, etc.) and send developers an updated bundle. Existing `SECRET_KEY` / `CSRF_SESSION_KEY` in the output file are preserved by default; use `--no-preserve-secrets` to rotate.
 
-### Step 7.4 — Create the first admin user
+### Step 7.3 — Create the first admin user
 
 Cognito **self-signup is disabled**. Create the first operator once (needed for local and cloud). Everyone else joins via team invite.
 
@@ -644,13 +616,13 @@ If they try `/login` with the temporary password instead, they are redirected to
 
 ### Path B — Local development (default — no CI/CD)
 
-**This is the golden path for kicking the tires.** You do **not** configure GitHub Actions, deploy a backend image, or wait for Amplify. The local API talks to cloud Cognito, DynamoDB, and SES using the files from Step 7.3.
+**This is the golden path for kicking the tires.** You do **not** configure GitHub Actions, deploy a backend image, or wait for Amplify. The local API talks to cloud Cognito, DynamoDB, and SES using the files from Step 7.2.
 
-#### Step 7.5 — Hand off config to developers
+#### Step 7.4 — Hand off config to developers
 
 Send `bootstrap/output/${ENV}/local-dev/` (zip or shared drive). Developers copy the three files per `local-dev/README.md`.
 
-#### Step 7.6 — Run local API and console
+#### Step 7.5 — Run local API and console
 
 ```bash
 # Developer machine — after copying files from local-dev/
@@ -661,10 +633,10 @@ cd console && npm run dev              # terminal 2 — http://127.0.0.1:5174
 
 Developers need AWS credentials for the profile in `run.sh` (same account/region as bootstrap). Open `http://127.0.0.1:5174/login` and set a new password when Cognito prompts.
 
-#### Step 7.7 — Test team invites (local)
+#### Step 7.6 — Test team invites (local)
 
 1. Log in at `http://127.0.0.1:5174/login`.
-2. Invite a teammate whose email you verified in Step 7.2 (sandbox recipients).
+2. Invite a teammate whose email you verified in Step 7.1 (sandbox recipients).
 3. Invite emails use `INVITE_FE_BASE_URL` from the generated `env_config.py` (default `http://127.0.0.1:5174`). The invitee opens the link on a machine running the local console, or pastes the invite code from the email at `/invite`.
 
 **You are done for local testing.** Stop here unless you need a hosted production API.
@@ -677,7 +649,7 @@ Developers need AWS credentials for the profile in `run.sh` (same account/region
 
 Only when you want the **hosted** API and Amplify console live. Requires GitHub Actions in your BOM repo — see **[§8](#8-cicd-contract-optional--cloud-production-only)**. Skip this entire path while developing locally.
 
-#### Step 7.8 — Deploy application code (GitHub Actions)
+#### Step 7.7 — Deploy application code (GitHub Actions)
 
 Stack-b starts the backend Lambda on a **seed image**. CI must build and deploy the real backend and handlers (contract in §8).
 
@@ -686,7 +658,7 @@ Stack-b starts the backend Lambda on a **seed image**. CI must build and deploy 
 
 If you re-deploy `<env>-stack-b` later, Lambda code resets to the seed image — re-run the releases pipeline afterward.
 
-#### Step 7.9 — Confirm the cloud API is live
+#### Step 7.8 — Confirm the cloud API is live
 
 ```bash
 BASE_URL=$(aws ssm get-parameter \
@@ -702,9 +674,9 @@ curl -s "${BASE_URL}/"
 
 **Pass:** the response is not exactly `seed image ok`.
 
-#### Step 7.10 — Test team invites (cloud)
+#### Step 7.9 — Test team invites (cloud)
 
-Log in at `FE_BASE_URL` (Amplify), invite by email. Production invite links use `FE_BASE_URL` (leave `INVITE_FE_BASE_URL` unset on Lambda). Until you leave the SES sandbox (Step 7.2 “Later”), invite only verified recipient addresses — or request [SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html) when you are ready for real users.
+Log in at `FE_BASE_URL` (Amplify), invite by email. Production invite links use `FE_BASE_URL` (leave `INVITE_FE_BASE_URL` unset on Lambda). Until you leave the SES sandbox (Step 7.1 “Later”), invite only verified recipient addresses — or request [SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html) when you are ready for real users.
 
 ---
 
@@ -714,7 +686,7 @@ Log in at `FE_BASE_URL` (Amplify), invite by email. Production invite links use 
 
 **Skip this section** for local development (Path B). You only need it when following [Path A](#path-a--cloud-go-live-optional-later).
 
-Stacks already create OIDC deploy roles and write SSM for CI. Configure GitHub Actions in your **releases** repo to:
+Stacks already create OIDC deploy roles and write SSM for CI. The IAM `sub` is `repo:{github_oidc_sub_prefix or github_repo}:environment:{stage}` — the same prefix for staging and production; only the environment suffix changes. GitHub Actions jobs must use `environment: staging` or `environment: production` (those GitHub Environments must exist). Configure GitHub Actions in your **BOM** repo to:
 
 1. Assume `GitHubActionsDeployRole-{env}-production` (and staging if enabled) via OIDC.
 2. Read `/{env}/bootstrap/platform-vars/production` from SSM.
@@ -765,13 +737,13 @@ python3.12 -m venv bootstrap/venv  (on this machine — do not copy venv/)
   → synth  →  bootstrap/output/<env>/
   → cdk bootstrap  (once per account/region)
   → cdk deploy <env>-stack-a  →  cdk deploy <env>-stack-b
-  → §7.1 write-state
-  → §7.2 verify SES
-  → §7.3 write-local-config  →  bootstrap/output/<env>/local-dev/
-  → §7.4 admin-create-user
-  → Path B (default): §7.5 handoff → §7.6 run local → §7.7 invites
+  → §6 write-state
+  → §7.1 verify SES
+  → §7.2 write-local-config  →  bootstrap/output/<env>/local-dev/
+  → §7.3 admin-create-user
+  → Path B (default): §7.4 handoff → §7.5 run local → §7.6 invites
        (stop here — no GitHub / no CI/CD)
-  → Path A (optional later): §7.8–7.10 + §8 CI/CD when you want cloud production
+  → Path A (optional later): §7.7–7.9 + §8 CI/CD when you want cloud production
 ```
 
 ---
@@ -874,6 +846,7 @@ Update `launcher/cdk/customer-config.json`:
 | ---------------------- | -------------------------------------------------------------------------- |
 | `extension_path`       | Sibling folder name for the extension repo                                 |
 | `github_handlers_repo` | Handlers/extension CI repo (defaults to `github_repo`)                     |
+| `github_handlers_oidc_sub_prefix` | Immutable OIDC prefix for that handlers repo (defaults to `github_oidc_sub_prefix` when it is the BOM repo) |
 | `compute_type`         | `fargate` or `ec2` for ECS/EC2 handlers; `lambda_only` for zip Lambda only |
 | `ec2_*`                | Only when `compute_type` is `ec2`                                          |
 
