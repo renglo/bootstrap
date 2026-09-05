@@ -145,12 +145,10 @@ def _package_lib(cdk_dir: Path) -> None:
         init_file = lib_dest / "__init__.py"
         if not init_file.is_file():
             init_file.write_text("", encoding="utf-8")
-    cdk_lib_src = _CDK_DIR / "lib" / "config_builder.py"
-    if cdk_lib_src.is_file():
-        shutil.copy2(cdk_lib_src, lib_dest / "config_builder.py")
-    github_oidc_src = _CDK_DIR / "lib" / "github_oidc.py"
-    if github_oidc_src.is_file():
-        shutil.copy2(github_oidc_src, lib_dest / "github_oidc.py")
+    cdk_lib_src = _CDK_DIR / "lib"
+    if cdk_lib_src.is_dir():
+        for py_file in cdk_lib_src.glob("*.py"):
+            shutil.copy2(py_file, lib_dest / py_file.name)
 
 
 def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
@@ -185,8 +183,10 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
     extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
-    if _GITHUB_OIDC_SRC.is_file():
-        shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
+    # compute_stack imports github_oidc as a sibling module on sys.path.
+    if not _GITHUB_OIDC_SRC.is_file():
+        raise FileNotFoundError(f"Missing extensions-service helper: {_GITHUB_OIDC_SRC}")
+    shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
 
     _package_lib(cdk_dir)
     _package_blueprints(cdk_dir, extension_path)
@@ -322,7 +322,7 @@ def main() -> None:
     p_write.add_argument(
         "--aws-region",
         default=None,
-        help="AWS region (default: AWS_REGION / AWS_DEFAULT_REGION / profile region)",
+        help="AWS region (default: aws_region from customer-config.json)",
     )
     p_write.add_argument(
         "--dry-run",
@@ -339,7 +339,7 @@ def main() -> None:
     p_local.add_argument(
         "--aws-region",
         default=None,
-        help="AWS region (default: AWS_REGION / AWS_DEFAULT_REGION / profile region)",
+        help="AWS region (default: aws_region from customer-config.json)",
     )
     p_local.add_argument(
         "--output-dir",
@@ -394,11 +394,13 @@ def main() -> None:
     elif args.command == "write-local-config":
         from write_local_config import run_write_local_config
 
+        cfg = _load_customer_config()
+        region = (args.aws_region or cfg.get("aws_region") or "us-east-1").strip()
         output_dir = Path(args.output_dir).resolve() if args.output_dir else None
         run_write_local_config(
             env_name=args.env_name.strip(),
             aws_profile=args.aws_profile,
-            aws_region=args.aws_region,
+            aws_region=region,
             output_dir=output_dir,
             stage=args.stage.strip() or "production",
             invite_fe_base_url=args.invite_fe_base_url.strip(),
