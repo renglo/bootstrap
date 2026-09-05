@@ -145,10 +145,10 @@ def _package_lib(cdk_dir: Path) -> None:
         init_file = lib_dest / "__init__.py"
         if not init_file.is_file():
             init_file.write_text("", encoding="utf-8")
-    cdk_lib_src = _CDK_DIR / "lib"
-    if cdk_lib_src.is_dir():
-        for py_file in cdk_lib_src.glob("*.py"):
-            shutil.copy2(py_file, lib_dest / py_file.name)
+    cdk_lib_dir = _CDK_DIR / "lib"
+    if cdk_lib_dir.is_dir():
+        for src in sorted(cdk_lib_dir.glob("*.py")):
+            shutil.copy2(src, lib_dest / src.name)
 
 
 def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
