@@ -63,10 +63,6 @@ def lambda_arn(region: str, account: str, function_name: MapValue) -> str:
     return f"arn:aws:lambda:{region}:{account}:function:{function_name}"
 
 
-def api_gateway_arn(region: str, account: str, api_id: MapValue) -> str:
-    return f"arn:aws:execute-api:{region}:{account}:{api_id}/*"
-
-
 def dynamodb_vars(env_name: str) -> dict[str, str]:
     return {
         "DYNAMODB_ENTITY_TABLE": f"{env_name}_entities",
@@ -134,9 +130,6 @@ def build_launcher_vars(
     rest_url = normalize_url(stage_app.get("rest_url", ""))
     ws_connections = normalize_url(stage_app.get("ws_connections", ""))
     ws_url = normalize_url(stage_app.get("ws_url", ""))
-    rest_api_id = stage_app.get("rest_api_id") or (
-        parse_rest_api_id(rest_url) if isinstance(rest_url, str) else ""
-    )
     handlers_fn = compute_outputs.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
     console_url = normalize_url(amplify_console_url)
 
@@ -146,7 +139,6 @@ def build_launcher_vars(
         # Invite links and similar console deep-links use the cloud Amplify URL.
         "FE_BASE_URL": console_url,
         "FROM_EMAIL": from_email,
-        "API_GATEWAY_ARN": api_gateway_arn(aws_region, aws_account, rest_api_id) if rest_api_id else "",
         "LAMBDA_BACKEND_ARN": lambda_arn(aws_region, aws_account, backend_fn),
         "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
         "ROLE_ARN": tenant_role_arn,
