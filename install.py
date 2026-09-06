@@ -334,7 +334,7 @@ def main() -> None:
         "write-local-config",
         help="Generate local dev config files (env_config.py, .env.development) from SSM",
     )
-    p_local.add_argument("--env-name", required=True, help="Environment name (e.g. stanley0731)")
+    p_local.add_argument("--env-name", required=True, help="Environment name (e.g. example0731)")
     p_local.add_argument("--aws-profile", default=None, help="AWS CLI profile name")
     p_local.add_argument(
         "--aws-region",

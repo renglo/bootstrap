@@ -3,7 +3,7 @@
 Run after write-state (stack-b deployed):
 
     python bootstrap/install.py write-local-config \\
-        --env-name stanley0731 \\
+        --env-name example0731 \\
         --aws-profile maker \\
         --aws-region us-east-1
 
