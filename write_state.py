@@ -247,7 +247,7 @@ def _webhook_ingress_vars(outputs_b: dict[str, str]) -> dict[str, str]:
         name_part = secret_arn.split(":")[-1]
         if name_part.endswith("-") is False and "-" in name_part:
             # Secrets Manager appends 6-char suffix; keep full path-style name if present
-            # e.g. stanley0731/renglo/ingress-secret-NPOl9q → stanley0731/renglo/ingress-secret
+            # e.g. <env>/renglo/ingress-secret-NPOl9q → <env>/renglo/ingress-secret
             base, _, maybe_suffix = name_part.rpartition("-")
             if base and len(maybe_suffix) == 6:
                 vars_out["RENGLO_INGRESS_SECRET_NAME"] = base
