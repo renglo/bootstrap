@@ -38,7 +38,6 @@ _DEFAULT_INVITE_FE = "http://127.0.0.1:5174"
 _DEFAULT_API_LOCAL = "http://127.0.0.1:5001"
 _DEFAULT_WS_LOCAL = "ws://127.0.0.1:8080"
 _DEFAULT_WSS_BACKEND = "http://127.0.0.1:8080/send_to_client"
-_DEFAULT_EXTENSIONS = "schd,data,pes"
 
 
 def _env_config_str(value: Any) -> str:
@@ -221,7 +220,6 @@ def _render_env_development(
     *,
     api_local_url: str,
     ws_local_url: str,
-    extensions: str,
 ) -> str:
     def v(key: str) -> str:
         return str(vars_block.get(key) or "")
@@ -242,7 +240,6 @@ def _render_env_development(
             "VITE_GOOGLE_MAPS_API_KEY=''",
             "",
             "VITE_DEV_MODE=true",
-            f"VITE_EXTENSIONS={_py_str(extensions)}",
             "",
         ]
     )
@@ -398,7 +395,6 @@ def run_write_local_config(
     api_local_url: str = _DEFAULT_API_LOCAL,
     ws_local_url: str = _DEFAULT_WS_LOCAL,
     wss_backend_url: str = _DEFAULT_WSS_BACKEND,
-    extensions: str = _DEFAULT_EXTENSIONS,
     preserve_secrets: bool = True,
     dry_run: bool = False,
 ) -> Path:
@@ -454,7 +450,6 @@ def run_write_local_config(
             vars_block,
             api_local_url=api_local_url,
             ws_local_url=ws_local_url,
-            extensions=extensions,
         ),
         "run.sh": _render_run_sh(aws_region=aws_region),
         "README.md": _render_handoff_readme(

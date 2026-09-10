@@ -357,11 +357,6 @@ def main() -> None:
         help="INVITE_FE_BASE_URL for local invite email links",
     )
     p_local.add_argument(
-        "--vite-extensions",
-        default="schd,data,pes",
-        help="VITE_EXTENSIONS value for .env.development",
-    )
-    p_local.add_argument(
         "--no-preserve-secrets",
         action="store_true",
         help="Generate new SECRET_KEY / CSRF_SESSION_KEY even if output files exist",
@@ -404,7 +399,6 @@ def main() -> None:
             output_dir=output_dir,
             stage=args.stage.strip() or "production",
             invite_fe_base_url=args.invite_fe_base_url.strip(),
-            extensions=args.vite_extensions.strip(),
             preserve_secrets=not args.no_preserve_secrets,
             dry_run=args.dry_run,
         )
