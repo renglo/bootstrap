@@ -28,7 +28,6 @@ from lib.config_builder import (  # noqa: E402
     build_ecs_network_vars,
     build_launcher_vars,
     build_platform_vars_envelope,
-    encode_peer_map,
     peer_routes_from_stack_outputs,
     ssm_deploy_input_path,
     ssm_ecs_security_groups_path,
@@ -393,8 +392,6 @@ def run_write_state(
         aws_account=account,
         spec=os.environ.get("PEER_ROUTES_SPEC", ""),
     )
-    peer_map_json = encode_peer_map(peer_map)
-
     extension_vars = {
         **_platform_ai_vars(outputs_a),
         **_extension_vars(env_name, outputs_b),
@@ -437,7 +434,6 @@ def run_write_state(
             ecs_network=ecs_network,
             extension_vars=extension_vars,
             from_email=from_email,
-            peer_map_json=peer_map_json,
         )
         vars_dict["LAMBDA_FUNCTION_NAME"] = stage_app["fn_name"]
         vars_dict["LAMBDA_ALIAS"] = stage
@@ -462,7 +458,6 @@ def run_write_state(
         compute_outputs=compute_outputs,
         ecs_network=ecs_network,
         extension_vars=extension_vars,
-        peer_map_json=peer_map_json,
     )
     deploy_envelope = build_deploy_input_envelope(
         github_handlers_repo=github_handlers_repo,
