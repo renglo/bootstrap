@@ -30,6 +30,10 @@ def ssm_peer_routes_path(env_name: str) -> str:
     return f"/{env_name}/bootstrap/peer-routes"
 
 
+def ssm_deploy_input_path(env_name: str) -> str:
+    return f"/{env_name}/bootstrap/deploy-input"
+
+
 def encode_peer_map(peer_map: dict[str, Any]) -> str:
     if not peer_map:
         return ""
