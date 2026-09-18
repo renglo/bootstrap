@@ -6,6 +6,7 @@ Values may be plain strings or CDK/CloudFormation tokens.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -25,8 +26,40 @@ def ssm_platform_vars_path(env_name: str, stage: str) -> str:
     return f"/{env_name}/bootstrap/platform-vars/{stage}"
 
 
+def ssm_peer_routes_path(env_name: str) -> str:
+    return f"/{env_name}/bootstrap/peer-routes"
+
+
 def ssm_deploy_input_path(env_name: str) -> str:
     return f"/{env_name}/bootstrap/deploy-input"
+
+
+def encode_peer_map(peer_map: dict[str, Any]) -> str:
+    if not peer_map:
+        return ""
+    return json.dumps(peer_map, separators=(",", ":"), sort_keys=True)
+
+
+def peer_routes_from_stack_outputs(
+    *,
+    extensions: list[str],
+    outputs: dict[str, str],
+    aws_region: str,
+    aws_account: str,
+) -> dict[str, Any]:
+    """Build handle → route entries from one peer stack's CloudFormation outputs."""
+    fn = str(outputs.get("HandlersLambdaFunctionName") or "").strip()
+    if not fn:
+        return {}
+    route = {
+        "lambda_function_name": fn,
+        "lambda_arn": lambda_arn(aws_region, aws_account, fn),
+        "ecs_cluster": str(outputs.get("HandlersEcsClusterName") or "").strip(),
+        "ecs_task_definition": str(outputs.get("HandlersTaskFamily") or "").strip(),
+        "ecs_results_bucket": str(outputs.get("HandlersResultsBucketName") or "").strip(),
+        "region": aws_region,
+    }
+    return {str(ext).strip(): dict(route) for ext in extensions if str(ext).strip()}
 
 
 def ssm_ecs_vpc_path(env_name: str) -> str:
