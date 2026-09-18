@@ -11,6 +11,7 @@ Run after stack-a (builds ECR :seed tag automatically) and stack-b are deployed:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,10 +28,13 @@ from lib.config_builder import (  # noqa: E402
     build_ecs_network_vars,
     build_launcher_vars,
     build_platform_vars_envelope,
+    encode_peer_map,
+    peer_routes_from_stack_outputs,
     ssm_deploy_input_path,
     ssm_ecs_security_groups_path,
     ssm_ecs_subnets_path,
     ssm_ecs_vpc_path,
+    ssm_peer_routes_path,
     ssm_platform_vars_path,
 )
 
@@ -150,6 +154,57 @@ def _stack_outputs(cfn, stack_name: str) -> dict[str, str]:
         if key and value is not None:
             outputs[key] = str(value)
     return outputs
+
+
+def _optional_stack_outputs(cfn, stack_name: str) -> dict[str, str]:
+    try:
+        return _stack_outputs(cfn, stack_name)
+    except SystemExit:
+        return {}
+    except Exception:
+        return {}
+
+
+def _parse_peer_routes_spec(raw: str) -> list[tuple[str, list[str]]]:
+    """``lab=arbitium;triage=arbitiumtriage`` or ``lab=arbitium,extra``."""
+    rows: list[tuple[str, list[str]]] = []
+    for part in (raw or "").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        peer_id, handles = part.split("=", 1)
+        peer_id = peer_id.strip()
+        extensions = [h.strip() for h in handles.split(",") if h.strip()]
+        if peer_id and extensions:
+            rows.append((peer_id, extensions))
+    return rows
+
+
+def _collect_peer_map(
+    cfn,
+    *,
+    env_name: str,
+    aws_region: str,
+    aws_account: str,
+    spec: str,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for peer_id, extensions in _parse_peer_routes_spec(spec):
+        stack_name = f"{env_name}-peer-{peer_id}"
+        outputs = _optional_stack_outputs(cfn, stack_name)
+        if not outputs:
+            print(f"  skip peer map {stack_name} (stack missing)")
+            continue
+        merged.update(
+            peer_routes_from_stack_outputs(
+                extensions=extensions,
+                outputs=outputs,
+                aws_region=aws_region,
+                aws_account=aws_account,
+            )
+        )
+        print(f"  peer map {stack_name}: {','.join(extensions)}")
+    return merged
 
 
 def _require_output(outputs: dict[str, str], key: str, *, stack_name: str) -> str:
@@ -331,6 +386,15 @@ def run_write_state(
         for k, v in outputs_b.items()
         if k.startswith("Handlers") or k in {"HandlersEcrRepoUri", "HandlersEcrRepoName"}
     }
+    peer_map = _collect_peer_map(
+        cfn,
+        env_name=env_name,
+        aws_region=region,
+        aws_account=account,
+        spec=os.environ.get("PEER_ROUTES_SPEC", ""),
+    )
+    peer_map_json = encode_peer_map(peer_map)
+
     extension_vars = {
         **_platform_ai_vars(outputs_a),
         **_extension_vars(env_name, outputs_b),
@@ -373,6 +437,7 @@ def run_write_state(
             ecs_network=ecs_network,
             extension_vars=extension_vars,
             from_email=from_email,
+            peer_map_json=peer_map_json,
         )
         vars_dict["LAMBDA_FUNCTION_NAME"] = stage_app["fn_name"]
         vars_dict["LAMBDA_ALIAS"] = stage
@@ -397,12 +462,21 @@ def run_write_state(
         compute_outputs=compute_outputs,
         ecs_network=ecs_network,
         extension_vars=extension_vars,
+        peer_map_json=peer_map_json,
     )
     deploy_envelope = build_deploy_input_envelope(
         github_handlers_repo=github_handlers_repo,
         vars_dict=deploy_vars,
     )
     _put_parameter(ssm, ssm_deploy_input_path(env_name), deploy_envelope, dry_run=dry_run)
+
+    if peer_map:
+        _put_parameter(
+            ssm,
+            ssm_peer_routes_path(env_name),
+            {"routes": peer_map},
+            dry_run=dry_run,
+        )
 
     if compute_type == "ec2":
         vpc = outputs_b.get(_ECS_NETWORK_OUTPUT_KEYS["vpc"], "").strip()

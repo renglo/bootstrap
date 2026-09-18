@@ -6,6 +6,7 @@ Values may be plain strings or CDK/CloudFormation tokens.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -25,8 +26,36 @@ def ssm_platform_vars_path(env_name: str, stage: str) -> str:
     return f"/{env_name}/bootstrap/platform-vars/{stage}"
 
 
-def ssm_deploy_input_path(env_name: str) -> str:
-    return f"/{env_name}/bootstrap/deploy-input"
+def ssm_peer_routes_path(env_name: str) -> str:
+    return f"/{env_name}/bootstrap/peer-routes"
+
+
+def encode_peer_map(peer_map: dict[str, Any]) -> str:
+    if not peer_map:
+        return ""
+    return json.dumps(peer_map, separators=(",", ":"), sort_keys=True)
+
+
+def peer_routes_from_stack_outputs(
+    *,
+    extensions: list[str],
+    outputs: dict[str, str],
+    aws_region: str,
+    aws_account: str,
+) -> dict[str, Any]:
+    """Build handle → route entries from one peer stack's CloudFormation outputs."""
+    fn = str(outputs.get("HandlersLambdaFunctionName") or "").strip()
+    if not fn:
+        return {}
+    route = {
+        "lambda_function_name": fn,
+        "lambda_arn": lambda_arn(aws_region, aws_account, fn),
+        "ecs_cluster": str(outputs.get("HandlersEcsClusterName") or "").strip(),
+        "ecs_task_definition": str(outputs.get("HandlersTaskFamily") or "").strip(),
+        "ecs_results_bucket": str(outputs.get("HandlersResultsBucketName") or "").strip(),
+        "region": aws_region,
+    }
+    return {str(ext).strip(): dict(route) for ext in extensions if str(ext).strip()}
 
 
 def ssm_ecs_vpc_path(env_name: str) -> str:
@@ -125,6 +154,7 @@ def build_launcher_vars(
     ecs_network: dict[str, MapValue],
     extension_vars: dict[str, MapValue],
     from_email: MapValue = "",
+    peer_map_json: MapValue = "",
 ) -> dict[str, MapValue]:
     backend_fn = stage_app.get("fn_name", f"{env_name}-backend-{stage}")
     rest_url = normalize_url(stage_app.get("rest_url", ""))
@@ -141,6 +171,7 @@ def build_launcher_vars(
         "FROM_EMAIL": from_email,
         "LAMBDA_BACKEND_ARN": lambda_arn(aws_region, aws_account, backend_fn),
         "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
+        "EXTERNAL_HANDLERS_PEER_MAP": peer_map_json,
         "ROLE_ARN": tenant_role_arn,
         **dynamodb_vars(env_name),
         "COGNITO_REGION": aws_region,
@@ -186,6 +217,7 @@ def build_deploy_input_vars(
     compute_outputs: dict[str, MapValue],
     ecs_network: dict[str, MapValue],
     extension_vars: dict[str, MapValue],
+    peer_map_json: MapValue = "",
 ) -> dict[str, MapValue]:
     handlers_fn = compute_outputs.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
     handlers_ecr_uri = compute_outputs.get("HandlersEcrRepoUri", "")
@@ -205,6 +237,7 @@ def build_deploy_input_vars(
             "ECS_TASK_DEFINITION": compute_outputs.get("HandlersTaskFamily", ""),
             "ECS_RESULTS_BUCKET": compute_outputs.get("HandlersResultsBucketName", ""),
             "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
+            "EXTERNAL_HANDLERS_PEER_MAP": peer_map_json,
             **dynamodb_vars(env_name),
             "COGNITO_REGION": aws_region,
             "COGNITO_USERPOOL_ID": cognito_user_pool_id,
