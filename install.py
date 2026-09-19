@@ -34,6 +34,7 @@ _BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
 _CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
 _COMPUTE_STACK_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "compute_stack.py"
 _GITHUB_OIDC_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "github_oidc.py"
+_PACKAGE_REGISTRY_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "package_registry.py"
 _CDK_SUBDIR = "cdk"
 
 _PACKAGE_FILES = (
@@ -187,6 +188,9 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
     if not _GITHUB_OIDC_SRC.is_file():
         raise FileNotFoundError(f"Missing extensions-service helper: {_GITHUB_OIDC_SRC}")
     shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
+    if not _PACKAGE_REGISTRY_SRC.is_file():
+        raise FileNotFoundError(f"Missing extensions-service helper: {_PACKAGE_REGISTRY_SRC}")
+    shutil.copy2(_PACKAGE_REGISTRY_SRC, extensions_dest / "package_registry.py")
 
     _package_lib(cdk_dir)
     _package_blueprints(cdk_dir, extension_path)
