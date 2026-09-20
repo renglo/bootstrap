@@ -219,7 +219,7 @@ After stack-b succeeds, follow **[§7](#7-after-bootstrap--make-the-app-usable)*
 | Stack A: AI amenities — S3 Vectors bucket, `rag-kb` index, RAG docs bucket, default Bedrock KB (`KB_ID`) | Extension-declared vector **indexes** (only when `extension_path` is set) |
 | Stack B: backend Lambda + REST/WebSocket API Gateway                                | ECS cluster, handlers ECR, EC2 ASG                                      |
 | Stack B: handlers Lambda (`{env}-handlers`) + handlers OIDC                         | `/{env}/bootstrap/ecs-*` SSM parameters                                 |
-| SSM bootstrap config after write-state                                              | `EXTERNAL_HANDLERS_ECS_HANDLERS` routing to ECS tasks                   |
+| SSM bootstrap config after write-state                                              | `/{env}/bootstrap/peer-routes` (handle → peer zip/ECS); sync vs `/start` is by API route |
 
 
 **About ECR:** the backend always uses a **container Lambda** (ECR + CodeDeploy) — that replaces the old Zappa zip deploy. You do not configure ECR manually for a new project; stack-a runs a seed build during deploy and CI pushes real images afterward. With `lambda_only`, **handlers** use a zip Lambda (no handlers ECR). Handlers ECR/ECS only apply when you switch to `fargate` or `ec2` for heavy extension workloads.
