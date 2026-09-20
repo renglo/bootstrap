@@ -260,6 +260,47 @@ def _platform_ai_vars(outputs_a: dict[str, str]) -> dict[str, str]:
     return vars_out
 
 
+def _peer_extension_vars(ssm: Any, env_name: str) -> dict[str, str]:
+    """Merge /{env}/bootstrap/peer-extension-vars/* written by peer CDK."""
+    path = f"/{env_name.strip()}/bootstrap/peer-extension-vars"
+    skip = {
+        "EXTERNAL_HANDLERS",
+        "EXTERNAL_HANDLERS_HEAVY",
+        "EXTERNAL_HANDLERS_ECS_HANDLERS",
+        "ActionsPolicyArn",
+        "ActionsPolicyName",
+        "ExtensionPath",
+    }
+    merged: dict[str, str] = {}
+    try:
+        paginator = ssm.get_paginator("get_parameters_by_path")
+        for page in paginator.paginate(Path=path, Recursive=True, WithDecryption=False):
+            for param in page.get("Parameters") or []:
+                raw = str(param.get("Value") or "").strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                for key, value in data.items():
+                    k = str(key).strip()
+                    if not k or k in skip or value is None:
+                        continue
+                    text = str(value).strip()
+                    if text:
+                        merged[k] = text
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)
+        if "ParameterNotFound" in err or "not found" in err.lower():
+            return {}
+        print(f"  skip peer-extension-vars ({exc})")
+        return {}
+    return merged
+
+
 def _extension_vars(env_name: str, outputs_b: dict[str, str]) -> dict[str, str]:
     manifest_path = _BOOTSTRAP_DIR / "output" / env_name / "extension-state.json"
     if not manifest_path.is_file():
@@ -395,6 +436,7 @@ def run_write_state(
     extension_vars = {
         **_platform_ai_vars(outputs_a),
         **_extension_vars(env_name, outputs_b),
+        **_peer_extension_vars(ssm, env_name),
         **_webhook_ingress_vars(outputs_b),
     }
     ecs_network = build_ecs_network_vars(compute_type=compute_type, network_mode_cfg=None)

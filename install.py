@@ -32,9 +32,10 @@ _WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 _BOOTSTRAP_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
 _CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
-_COMPUTE_STACK_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "compute_stack.py"
-_GITHUB_OIDC_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "github_oidc.py"
-_PACKAGE_REGISTRY_SRC = _WORKSPACE_ROOT / "extensions-service" / "scripts" / "package_registry.py"
+_HELPER_CDK = _WORKSPACE_ROOT / "bom-helper" / "cdk"
+_COMPUTE_STACK_SRC = _HELPER_CDK / "compute_stack.py"
+_GITHUB_OIDC_SRC = _HELPER_CDK / "github_oidc.py"
+_PACKAGE_REGISTRY_SRC = _HELPER_CDK / "package_registry.py"
 _CDK_SUBDIR = "cdk"
 
 _PACKAGE_FILES = (
@@ -122,10 +123,11 @@ def _remove_cdk_out_marker(output_path: Path) -> None:
 
 
 def _package_blueprints(cdk_dir: Path, extension_path: str) -> None:
-    """Stage blueprint JSON for the stack-b custom resource asset."""
+    """Stage launcher + catalog extension blueprint JSON for the stack-b uploader."""
     dest = cdk_dir / "bootstrap-assets" / "blueprints"
     if dest.exists():
         shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
     launcher_src = _WORKSPACE_ROOT / "launcher" / "scripts" / "blueprints"
     if launcher_src.is_dir():
         shutil.copytree(launcher_src, dest / "launcher")
@@ -135,6 +137,24 @@ def _package_blueprints(cdk_dir: Path, extension_path: str) -> None:
             if candidate.is_dir():
                 shutil.copytree(candidate, dest / "extension")
                 break
+    helper_scripts = _WORKSPACE_ROOT / "bom-helper" / "scripts"
+    if helper_scripts.is_dir() and str(helper_scripts) not in sys.path:
+        sys.path.insert(0, str(helper_scripts))
+    from extension_actions import catalog_actions_specs  # noqa: PLC0415
+
+    targets = _find_catalog_targets()
+    if targets is None:
+        return
+    repo_root = _WORKSPACE_ROOT.parent
+    for spec in catalog_actions_specs(targets, repo_root):
+        for candidate in (spec.folder / "blueprints", spec.folder / "installer" / "blueprints"):
+            if not candidate.is_dir():
+                continue
+            dest_ext = dest / spec.handle
+            if dest_ext.exists():
+                shutil.rmtree(dest_ext)
+            shutil.copytree(candidate, dest_ext)
+            break
 
 
 def _package_lib(cdk_dir: Path) -> None:
@@ -149,6 +169,18 @@ def _package_lib(cdk_dir: Path) -> None:
     cdk_lib_dir = _CDK_DIR / "lib"
     if cdk_lib_dir.is_dir():
         for src in sorted(cdk_lib_dir.glob("*.py")):
+            shutil.copy2(src, lib_dest / src.name)
+
+    helper_scripts = _WORKSPACE_ROOT / "bom-helper" / "scripts"
+    helper_cdk = _WORKSPACE_ROOT / "bom-helper" / "cdk"
+    for src in (
+        helper_scripts / "extension_actions.py",
+        helper_scripts / "bom_layout.py",
+        helper_scripts / "catalog_slots.py",
+        helper_scripts / "peers.py",
+        helper_cdk / "extension_actions_iam.py",
+    ):
+        if src.is_file():
             shutil.copy2(src, lib_dest / src.name)
 
 
@@ -183,17 +215,48 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
 
     extensions_dest = cdk_dir / "extensions"
     extensions_dest.mkdir(parents=True, exist_ok=True)
+    if not _COMPUTE_STACK_SRC.is_file():
+        raise FileNotFoundError(f"Missing bom-helper helper: {_COMPUTE_STACK_SRC}")
     shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
     # compute_stack imports github_oidc as a sibling module on sys.path.
     if not _GITHUB_OIDC_SRC.is_file():
-        raise FileNotFoundError(f"Missing extensions-service helper: {_GITHUB_OIDC_SRC}")
+        raise FileNotFoundError(f"Missing bom-helper helper: {_GITHUB_OIDC_SRC}")
     shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
     if not _PACKAGE_REGISTRY_SRC.is_file():
-        raise FileNotFoundError(f"Missing extensions-service helper: {_PACKAGE_REGISTRY_SRC}")
+        raise FileNotFoundError(f"Missing bom-helper helper: {_PACKAGE_REGISTRY_SRC}")
     shutil.copy2(_PACKAGE_REGISTRY_SRC, extensions_dest / "package_registry.py")
 
     _package_lib(cdk_dir)
+    _package_extension_actions(cdk_dir)
     _package_blueprints(cdk_dir, extension_path)
+
+
+def _find_catalog_targets() -> Path | None:
+    cfg = _load_customer_config()
+    github_repo = str(cfg.get("github_repo", "")).strip()
+    checkout = github_repo.rstrip("/").split("/")[-1] if github_repo else ""
+    if checkout:
+        candidate = _WORKSPACE_ROOT / checkout / "deploy_targets.yml"
+        if candidate.is_file():
+            return candidate
+    matches = sorted(_WORKSPACE_ROOT.glob("*-bom/deploy_targets.yml"))
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _package_extension_actions(cdk_dir: Path) -> None:
+    """Bundle catalog installer/infra + deploy_targets for packaged synth."""
+    helper_scripts = _WORKSPACE_ROOT / "bom-helper" / "scripts"
+    if helper_scripts.is_dir() and str(helper_scripts) not in sys.path:
+        sys.path.insert(0, str(helper_scripts))
+    from extension_actions import bundle_catalog_installer_infra  # noqa: PLC0415
+
+    targets = _find_catalog_targets()
+    if targets is not None and targets.is_file():
+        shutil.copy2(targets, cdk_dir / "deploy_targets.yml")
+    repo_root = _WORKSPACE_ROOT.parent
+    bundle_catalog_installer_infra(cdk_dir, repo_root, targets)
 
 
 def _copy_templates_to_env_root(cdk_dir: Path, env_root: Path, env_name: str) -> list[Path]:
