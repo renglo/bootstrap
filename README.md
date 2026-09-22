@@ -2,13 +2,13 @@
 
 Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL).
 
-**Default path (kick the tires):** install the **Renglo platform only** — Cognito, DynamoDB, S3, SES, and handlers Lambda (`compute_type: lambda_only`) — then run the app **locally**. Follow **§1–§6**, then **[§7 Path B](#path-b--local-development-default--no-cicd)**. No GitHub Actions and no cloud backend deploy.
+**Default path (kick the tires):** install the **Renglo platform only** — Cognito, DynamoDB, S3, SES, and the hub API placeholder — then run the app **locally**. Follow **§1–§6**, then **[§7 Path B](#path-b--local-development-default--no-cicd)**. No GitHub Actions and no cloud backend deploy. Handler compute is on peer stacks.
 
 **Team invite email is required.** Configure SES in [§3.3](#step-33--set-up-application-email-required) before synth; finish invites in §7.
 
 **Cloud production (later):** when you want the hosted API live, use [§7 Path A](#path-a--cloud-go-live-optional-later) and the optional [§8 CI/CD contract](#8-cicd-contract-optional--cloud-production-only).
 
-**Advanced:** extensions and/or ECS/EC2 handlers — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
+**Advanced:** extensions and peer compute — see [bom-helper/docs/PEERS.md](../bom-helper/docs/PEERS.md).
 
 ---
 
@@ -41,12 +41,12 @@ Create a workspace folder and clone the three **platform** repos:
 mkdir <workspace> && cd <workspace>
 git clone https://github.com/renglo/bootstrap.git bootstrap
 git clone https://github.com/renglo/launcher.git launcher
-git clone https://github.com/renglo/extensions-service.git extensions-service
+git clone https://github.com/renglo/bom-helper.git bom-helper
 ```
 
 You can use any name instead of `infra-installer` for the workspace folder (e.g. `ops/`).
 
-`extensions-service` is required even without an extension: CDK synth imports `compute_stack.py` from it to define the handlers Lambda and OIDC roles. You do **not** clone an extension repo unless you need [Advanced: extensions](#advanced-extensions-and-ecsec2-handlers).
+Peer compute CDK lives in `bom-helper`. You do **not** clone an extension repo unless you need that handle on a peer — see [PEERS.md](../bom-helper/docs/PEERS.md).
 
 ---
 
@@ -135,7 +135,7 @@ cp customer-config.example.json customer-config.json
 
 ### Step 3.2 — Set platform fields
 
-Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_type: lambda_only` for a standard install:
+Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Hub identity only — no `compute_type`, `ec2_*`, or `github_handlers_*`.
 
 
 | Field                        | Purpose                                                                    |
@@ -143,16 +143,12 @@ Edit `launcher/cdk/customer-config.json`. Omit `extension_path`. Use `compute_ty
 | `env_name`                   | Prefix for AWS resources and synth output (`bootstrap/output/<env_name>/`) |
 | `github_repo`                | **BOM** repo (backend CI via OIDC)                                    |
 | `enable_staging`             | `false` = production only; `true` = production + staging                   |
-| `compute_type`               | `lambda_only` — handlers deploy as a Lambda zip from CI                    |
 
 Account and region are **not** in this file. Choose them at deploy time (`AWS_PROFILE` / `AWS_REGION`). Templates resolve `AWS::AccountId` / `AWS::Region`.
 
-
-Optional: `github_handlers_repo` defaults to `github_repo` when omitted.
-
 #### Optional — GitHub owner / repo IDs (immutable OIDC `sub`)
 
-For IAM trust policies that accept GitHub’s immutable subject format (`repo:ORG@OWNER-ID/REPO@REPO-ID:environment:…`), set `github_owner_id` and `github_repo_id` (and `github_handlers_*` when handlers use a different repo). From the repo directory (or substitute `owner` / `repo`):
+For IAM trust policies that accept GitHub’s immutable subject format (`repo:ORG@OWNER-ID/REPO@REPO-ID:environment:…`), set `github_owner_id` and `github_repo_id`. From the repo directory (or substitute `owner` / `repo`):
 
 ```bash
 gh api "repos/{owner}/{repo}" --jq "{owner_id: .owner.id, repo_id: .id}"
@@ -185,7 +181,6 @@ When the domain’s public DNS is in Route53 **in this account** (usual case):
   "env_name": "myenv",
   "github_repo": "MyOrg/my-bom-repo",
   "enable_staging": false,
-  "compute_type": "lambda_only",
   "email_from": "noreply@your-app-domain.com",
   "email_identity_type": "domain",
   "email_hosted_zone_id": "Z0123456789EXAMPLE"
@@ -211,15 +206,14 @@ After stack-b succeeds, follow **[§7](#7-after-bootstrap--make-the-app-usable)*
 ### What the default install creates
 
 
-| Included                                                                            | Not included (see [Advanced](#advanced-extensions-and-ecsec2-handlers)) |
+| Included                                                                            | Not included (see [PEERS.md](../bom-helper/docs/PEERS.md)) |
 | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Stack A: Cognito, S3, DynamoDB, tenant IAM, releases OIDC, backend ECR + CodeDeploy | Extension S3 buckets and IAM                                            |
 | Stack A: SES domain/email identity + invite from-address (`email_from`)             | Verified personal/work from-addresses unrelated to your app             |
 | Stack A: seed CodeBuild (builds initial backend container image during deploy)      | Extension blueprints in DynamoDB                                        |
-| Stack A: AI amenities — S3 Vectors bucket, `rag-kb` index, RAG docs bucket, default Bedrock KB (`KB_ID`) | Extension-declared vector **indexes** (only when `extension_path` is set) |
-| Stack B: backend Lambda + REST/WebSocket API Gateway                                | ECS cluster, handlers ECR, EC2 ASG                                      |
-| Stack B: handlers Lambda (`{env}-handlers`) + handlers OIDC                         | `/{env}/bootstrap/ecs-*` SSM parameters                                 |
-| SSM bootstrap config after write-state                                              | `/{env}/bootstrap/peer-routes` (handle → peer zip/ECS); sync vs `/start` is by API route |
+| Stack A: AI amenities — S3 Vectors bucket, `rag-kb` index, RAG docs bucket, default Bedrock KB (`KB_ID`) | Extension-declared vector **indexes** (catalog / peer) |
+| Stack B: backend Lambda + REST/WebSocket API Gateway                                | Peer Lambda / Fargate / EC2 (`{env}-peer-*`) |
+| SSM bootstrap config after write-state                                              | `/{env}/bootstrap/peer-routes` until peer stacks exist |
 
 
 **About ECR:** the backend always uses a **container Lambda** (ECR + CodeDeploy) — that replaces the old Zappa zip deploy. You do not configure ECR manually for a new project; stack-a runs a seed build during deploy and CI pushes real images afterward. With `lambda_only`, **handlers** use a zip Lambda (no handlers ECR). Handlers ECR/ECS only apply when you switch to `fargate` or `ec2` for heavy extension workloads.
@@ -389,8 +383,6 @@ cdk deploy "${ENV}-stack-b" \
   --profile "$AWS_PROFILE"
 ```
 
-With `compute_type=ec2`, add deploy-time parameters to this command — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
-
 When stack-b finishes, continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usable)** (Path B by default).
 
 ### Fallback — if `cdk deploy` fails
@@ -474,8 +466,8 @@ Use `--dry-run` to preview without writing.
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------- |
 | `/{env}/bootstrap/platform-vars/production` | BOM repo CI — production                  | `GitHubActionsDeployRole-{env}-production`   |
 | `/{env}/bootstrap/platform-vars/staging`    | BOM repo CI — staging (if enabled)        | `GitHubActionsDeployRole-{env}-staging`      |
-| `/{env}/bootstrap/deploy-input`             | Handlers repo CI                               | `GitHubActionsHandlersRole-{env}-production` |
-| `/{env}/bootstrap/ecs-*`                    | Handlers EC2 network (`compute_type=ec2` only) | releases + handlers OIDC roles               |
+| `/{env}/bootstrap/deploy-input`             | Shared runtime input for peers            | peer CI / packager                           |
+| `/{env}/bootstrap/peer-routes`              | Handle → peer zip/ECS                     | API router                                   |
 
 
 Each JSON envelope has `GITHUB_REPOSITORY`, `ENVIRONMENT`, `VARS`, and `SECRETS` (always `{}`). Application secrets (e.g. `OPENAI_API_KEY`) are **repo secrets** in GitHub, not in SSM.
@@ -802,7 +794,7 @@ aws ssm get-parameter \
   | jq '.VARS | {LAMBDA_HANDLERS_FUNCTION_NAME, ECR_IMAGE_URI, ECS_CLUSTER}'
 ```
 
-For ECS/EC2 handler setups, merge `ecs-*` parameters into runtime `VARS` — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
+Peer ECS network, when needed, is on the peer stack — see [PEERS.md](../bom-helper/docs/PEERS.md).
 
 `bootstrap/helpers/inject_github_env_vars.py` is a legacy utility, not part of the bootstrap flow.
 
@@ -899,84 +891,11 @@ find . -name "*.sh" -exec sed -i 's/\r$//' {} \;
 
 
 
-## Advanced: extensions and ECS/EC2 handlers
+## Advanced: extensions and peer compute
 
-Use this when you need an **external extension** (extension-specific IAM, blueprints, threat-events bucket) and/or **handlers on ECS/EC2** because the workload does not fit a Lambda zip (large dependencies, long-running tasks).
+Do **not** put `extension_path`, `compute_type`, `ec2_*`, or `github_handlers_*` on `customer-config.json`. Hub stacks stay API-only.
 
-Everything else stays the same: follow §1–§7 (Path B for local), then adjust config and re-deploy stack-b.
-
-### Config changes
-
-Clone the extension repo as a sibling folder (e.g. `arbitiumlab/`) with `installer/infra/cdk_extension.json`.
-
-Update `launcher/cdk/customer-config.json`:
-
-```json
-{
-  "env_name": "myenv",
-  "github_repo": "MyOrg/my-bom-repo",
-  "github_handlers_repo": "MyOrg/my-handlers-repo",
-  "extension_path": "arbitiumlab",
-  "enable_staging": true,
-  "compute_type": "fargate",
-  "email_from": "noreply@your-app-domain.com",
-  "email_identity_type": "domain",
-  "email_hosted_zone_id": "Z0123456789EXAMPLE"
-}
-```
-
-
-| Field                  | When to set                                                                |
-| ---------------------- | -------------------------------------------------------------------------- |
-| `extension_path`       | Sibling folder name for the extension repo                                 |
-| `github_handlers_repo` | Handlers/extension CI repo (defaults to `github_repo`)                     |
-| `compute_type`         | `fargate` or `ec2` for ECS/EC2 handlers; `lambda_only` for zip Lambda only |
-| `ec2_*`                | Only when `compute_type` is `ec2`                                          |
-
-
-Re-run synth and update stack-b (stack-a only needs redeploy if platform settings changed):
-
-```bash
-python3.12 bootstrap/install.py synth
-
-cd bootstrap/output/${ENV}
-aws cloudformation deploy \
-  --template-file "${ENV}-stack-b.template.json" \
-  --stack-name "${ENV}-stack-b" \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION"
-```
-
-Large stack-b templates may need `--s3-bucket` using the data bucket from stack-a (see appendix).
-
-### Handlers EC2 network (deploy-time)
-
-When `compute_type=ec2`, pass parameters on stack-b deploy:
-
-```bash
-  --parameter-overrides \
-    "HandlersNetworkMode=existing" \
-    "ExistingVpcId=vpc-0123456789abcdef0" \
-    "ExistingSubnetIds=subnet-aaa,subnet-bbb"
-```
-
-Default is `HandlersNetworkMode=create` (dedicated VPC). `ExistingSubnetIds` must belong to `ExistingVpcId` and span at least two Availability Zones.
-
-### CI/CD differences
-
-- Handlers CI pushes container images to handlers ECR and updates ECS task definitions (not a Lambda zip).
-- Merge `/{env}/bootstrap/ecs-vpc`, `ecs-subnets`, and `ecs-security-groups` into runtime `VARS`:
-
-```bash
-python bootstrap/helpers/merge_bootstrap_ssm.py "${ENV}" production \
-  --aws-profile "$AWS_PROFILE" --aws-region "$AWS_REGION" > platform_vars.production.json
-
-python bootstrap/helpers/merge_bootstrap_ssm.py "${ENV}" deploy-input \
-  --aws-profile "$AWS_PROFILE" --aws-region "$AWS_REGION" > deploy_input.json
-```
-
-Synth emits `extension-state.json` and `extension-blueprints/` at the env root when `extension_path` is set.
+Place handles and choose Lambda / Fargate / EC2 on a **peer** in the tenant BOM catalog. Follow [bom-helper/docs/PEERS.md](../bom-helper/docs/PEERS.md).
 
 ---
 

@@ -32,10 +32,6 @@ _WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 _BOOTSTRAP_DIR = Path(__file__).resolve().parent
 _BOOTSTRAP_VENV = _BOOTSTRAP_DIR / "venv"
 _CDK_DIR = _WORKSPACE_ROOT / "launcher" / "cdk"
-_HELPER_CDK = _WORKSPACE_ROOT / "bom-helper" / "cdk"
-_COMPUTE_STACK_SRC = _HELPER_CDK / "compute_stack.py"
-_GITHUB_OIDC_SRC = _HELPER_CDK / "github_oidc.py"
-_PACKAGE_REGISTRY_SRC = _HELPER_CDK / "package_registry.py"
 _CDK_SUBDIR = "cdk"
 
 _PACKAGE_FILES = (
@@ -212,19 +208,6 @@ def _package_deploy_tree(cdk_dir: Path, *, extension_path: str = "") -> None:
             assets_dest,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
-
-    extensions_dest = cdk_dir / "extensions"
-    extensions_dest.mkdir(parents=True, exist_ok=True)
-    if not _COMPUTE_STACK_SRC.is_file():
-        raise FileNotFoundError(f"Missing bom-helper helper: {_COMPUTE_STACK_SRC}")
-    shutil.copy2(_COMPUTE_STACK_SRC, extensions_dest / "compute_stack.py")
-    # compute_stack imports github_oidc as a sibling module on sys.path.
-    if not _GITHUB_OIDC_SRC.is_file():
-        raise FileNotFoundError(f"Missing bom-helper helper: {_GITHUB_OIDC_SRC}")
-    shutil.copy2(_GITHUB_OIDC_SRC, extensions_dest / "github_oidc.py")
-    if not _PACKAGE_REGISTRY_SRC.is_file():
-        raise FileNotFoundError(f"Missing bom-helper helper: {_PACKAGE_REGISTRY_SRC}")
-    shutil.copy2(_PACKAGE_REGISTRY_SRC, extensions_dest / "package_registry.py")
 
     _package_lib(cdk_dir)
     _package_extension_actions(cdk_dir)

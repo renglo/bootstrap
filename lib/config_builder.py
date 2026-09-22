@@ -163,8 +163,9 @@ def build_launcher_vars(
     rest_url = normalize_url(stage_app.get("rest_url", ""))
     ws_connections = normalize_url(stage_app.get("ws_connections", ""))
     ws_url = normalize_url(stage_app.get("ws_url", ""))
-    handlers_fn = compute_outputs.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
+    handlers_fn = str(compute_outputs.get("HandlersLambdaFunctionName") or "").strip()
     console_url = normalize_url(amplify_console_url)
+    handlers_arn = lambda_arn(aws_region, aws_account, handlers_fn) if handlers_fn else ""
 
     base: dict[str, MapValue] = {
         "WL_NAME": env_name,
@@ -173,7 +174,7 @@ def build_launcher_vars(
         "FE_BASE_URL": console_url,
         "FROM_EMAIL": from_email,
         "LAMBDA_BACKEND_ARN": lambda_arn(aws_region, aws_account, backend_fn),
-        "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
+        "LAMBDA_EXTERNAL_HANDLERS_ARN": handlers_arn,
         "ROLE_ARN": tenant_role_arn,
         **dynamodb_vars(env_name),
         "COGNITO_REGION": aws_region,
@@ -220,10 +221,11 @@ def build_deploy_input_vars(
     ecs_network: dict[str, MapValue],
     extension_vars: dict[str, MapValue],
 ) -> dict[str, MapValue]:
-    handlers_fn = compute_outputs.get("HandlersLambdaFunctionName", f"{env_name}-handlers")
+    handlers_fn = str(compute_outputs.get("HandlersLambdaFunctionName") or "").strip()
     handlers_ecr_uri = compute_outputs.get("HandlersEcrRepoUri", "")
     ws_connections = normalize_url(production_app.get("ws_connections", ""))
     ws_url = normalize_url(production_app.get("ws_url", ""))
+    handlers_arn = lambda_arn(aws_region, aws_account, handlers_fn) if handlers_fn else ""
 
     ecr_image_uri: MapValue = handlers_ecr_uri
     if isinstance(handlers_ecr_uri, str) and handlers_ecr_uri:
@@ -237,7 +239,7 @@ def build_deploy_input_vars(
             "ECS_CLUSTER": compute_outputs.get("HandlersEcsClusterName", ""),
             "ECS_TASK_DEFINITION": compute_outputs.get("HandlersTaskFamily", ""),
             "ECS_RESULTS_BUCKET": compute_outputs.get("HandlersResultsBucketName", ""),
-            "LAMBDA_EXTERNAL_HANDLERS_ARN": lambda_arn(aws_region, aws_account, handlers_fn),
+            "LAMBDA_EXTERNAL_HANDLERS_ARN": handlers_arn,
             **dynamodb_vars(env_name),
             "COGNITO_REGION": aws_region,
             "COGNITO_USERPOOL_ID": cognito_user_pool_id,
@@ -271,11 +273,11 @@ def build_platform_vars_envelope(
 
 def build_deploy_input_envelope(
     *,
-    github_handlers_repo: str,
+    github_repo: str,
     vars_dict: dict[str, MapValue],
 ) -> dict[str, Any]:
     return build_platform_vars_envelope(
-        github_repo=github_handlers_repo,
+        github_repo=github_repo,
         stage="production",
         vars_dict=vars_dict,
     )

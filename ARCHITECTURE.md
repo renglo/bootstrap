@@ -114,7 +114,7 @@ GitHub Environment for the **releases** repo (merged from `launcher/state/<ext>/
 }
 ```
 
-When using `compute_type=ec2`, `ECS_VPC`, `ECS_SUBNETS`, and `ECS_SECURITY_GROUPS` are written to separate SSM parameters (`/{env}/bootstrap/ecs-*`) at deploy time. CI/CD merges them into `VARS` (see `bootstrap/helpers/merge_bootstrap_ssm.py`).
+Hub Stack B no longer writes overflow `LAMBDA_EXTERNAL_HANDLERS_ARN` or ECS network. Those values come from `{env}-peer-*` stacks and `/{env}/bootstrap/peer-routes`.
 
 ---
 

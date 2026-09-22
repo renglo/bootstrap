@@ -25,14 +25,10 @@ if str(_BOOTSTRAP_DIR) not in sys.path:
 from lib.config_builder import (  # noqa: E402
     build_deploy_input_envelope,
     build_deploy_input_vars,
-    build_ecs_network_vars,
     build_launcher_vars,
     build_platform_vars_envelope,
     peer_routes_from_stack_outputs,
     ssm_deploy_input_path,
-    ssm_ecs_security_groups_path,
-    ssm_ecs_subnets_path,
-    ssm_ecs_vpc_path,
     ssm_peer_routes_path,
     ssm_platform_vars_path,
 )
@@ -58,13 +54,6 @@ _AMPLIFY_CONSOLE_URL_KEYS = {
     "production": "AmplifyConsoleUrlProduction",
     "staging": "AmplifyConsoleUrlStaging",
 }
-
-_ECS_NETWORK_OUTPUT_KEYS = {
-    "vpc": "HandlersComputeVpcId",
-    "subnets": "HandlersComputeSubnetIds",
-    "security_group": "HandlersComputeSecurityGroupId",
-}
-
 
 def _load_customer_config(env_name: str) -> dict[str, Any]:
     candidates = (
@@ -368,14 +357,6 @@ def _put_parameter(
     print(f"  wrote {name}")
 
 
-def _put_plain_parameter(ssm, name: str, value: str, *, dry_run: bool) -> None:
-    if dry_run:
-        print(f"  [dry-run] would write {name} = {value!r}")
-        return
-    ssm.put_parameter(Name=name, Value=value, Type="String", Overwrite=True)
-    print(f"  wrote {name}")
-
-
 def run_write_state(
     *,
     env_name: str,
@@ -390,9 +371,7 @@ def run_write_state(
     github_repo = str(cfg.get("github_repo", "")).strip()
     if not github_repo:
         raise SystemExit("ERROR: customer-config.json must set github_repo")
-    github_handlers_repo = str(cfg.get("github_handlers_repo", github_repo)).strip() or github_repo
     enable_staging = bool(cfg.get("enable_staging", True))
-    compute_type = str(cfg.get("compute_type", "fargate")).strip() or "fargate"
     from_email = str(cfg.get("email_from", "") or "").strip()
 
     stack_a = f"{env_name}-stack-a"
@@ -424,7 +403,7 @@ def run_write_state(
     compute_outputs = {
         k: v
         for k, v in outputs_b.items()
-        if k.startswith("Handlers") or k in {"HandlersEcrRepoUri", "HandlersEcrRepoName"}
+        if k.startswith("Handlers")
     }
     peer_map = _collect_peer_map(
         cfn,
@@ -439,7 +418,7 @@ def run_write_state(
         **_peer_extension_vars(ssm, env_name),
         **_webhook_ingress_vars(outputs_b),
     }
-    ecs_network = build_ecs_network_vars(compute_type=compute_type, network_mode_cfg=None)
+    ecs_network: dict[str, Any] = {}
 
     print("\nWriting SSM parameters...")
     stages = ["production"]
@@ -502,7 +481,7 @@ def run_write_state(
         extension_vars=extension_vars,
     )
     deploy_envelope = build_deploy_input_envelope(
-        github_handlers_repo=github_handlers_repo,
+        github_repo=github_repo,
         vars_dict=deploy_vars,
     )
     _put_parameter(ssm, ssm_deploy_input_path(env_name), deploy_envelope, dry_run=dry_run)
@@ -515,23 +494,8 @@ def run_write_state(
             dry_run=dry_run,
         )
 
-    if compute_type == "ec2":
-        vpc = outputs_b.get(_ECS_NETWORK_OUTPUT_KEYS["vpc"], "").strip()
-        subnets = outputs_b.get(_ECS_NETWORK_OUTPUT_KEYS["subnets"], "").strip()
-        sg = outputs_b.get(_ECS_NETWORK_OUTPUT_KEYS["security_group"], "").strip()
-        if vpc:
-            _put_plain_parameter(ssm, ssm_ecs_vpc_path(env_name), vpc, dry_run=dry_run)
-        if subnets:
-            _put_plain_parameter(ssm, ssm_ecs_subnets_path(env_name), subnets, dry_run=dry_run)
-        if sg:
-            _put_plain_parameter(ssm, ssm_ecs_security_groups_path(env_name), sg, dry_run=dry_run)
-
     print("\nBootstrap SSM config written.")
     print(f"  {ssm_platform_vars_path(env_name, 'production')}")
     if enable_staging and outputs_b.get("BackendLambdaFunctionNameStaging"):
         print(f"  {ssm_platform_vars_path(env_name, 'staging')}")
     print(f"  {ssm_deploy_input_path(env_name)}")
-    if compute_type == "ec2":
-        print(f"  {ssm_ecs_vpc_path(env_name)}")
-        print(f"  {ssm_ecs_subnets_path(env_name)}")
-        print(f"  {ssm_ecs_security_groups_path(env_name)}")
