@@ -1,3 +1,9 @@
 # git-convoy membership marker (repo root).
-# role: product (default if absent) | aux | bom
-role = "aux"
+# role: product (default if absent) | ops | bom | incubating
+role = "ops"
+# How this repo versions itself: python | npm | both
+version = "python"
+# What a v* tag publishes: none | python-wheel | npm
+publish = "python-wheel"
+# Preferred pin style: registry | git-tag | git-sha
+pin = "registry"

@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bootstrap"
+version = "0.1.0"
+description = "Environment installation scripts for Renglo tenant workspaces"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = []

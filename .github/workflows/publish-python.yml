@@ -1,0 +1,80 @@
+name: Publish Python to publisher registry
+
+# Copy this file to each Python product repo (.github/workflows/publish.yml).
+# Canonical copy: ops/publisher/workflows/publish-python.yml
+#
+# GitHub Actions repository variables (set on each product repo — not org-wide):
+#   AWS_PUBLISH_ROLE_ARN      output OidcPublishRoleArn of <publisher-name>-publisher
+#   PUBLISHER_NAME            output PublisherName (e.g. renglo)
+#   AWS_REGION                same region as publisher stack deploy
+#   PACKAGE_DIR               . | package | ui
+#
+# Optional (repo-level):
+#   AWS_REGION             default us-east-1 (must match the publisher stack region)
+#   PACKAGE_DIR            default .  (use "package" for Renglo-style extensions)
+#   PUBLISH_PUBLIC         "true" to also upload to PyPI (needs secret PYPI_API_TOKEN)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish_public:
+        description: Also publish to public PyPI
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Publish to CodeArtifact
+        env:
+          PACKAGE_DIR: ${{ vars.PACKAGE_DIR || '.' }}
+          PUBLISHER_NAME: ${{ vars.PUBLISHER_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLISHER_NAME:-}" ]; then
+            echo "Set repository variable PUBLISHER_NAME (e.g. renglo)" >&2
+            exit 1
+          fi
+          slug=$(printf '%s' "$PUBLISHER_NAME" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+          CONFIG_PARAM="/publisher/${slug}/config"
+          CONFIG=$(aws ssm get-parameter --name "$CONFIG_PARAM" --query Parameter.Value --output text)
+          DOMAIN=$(printf '%s' "$CONFIG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["domain"])')
+          REPO=$(printf '%s' "$CONFIG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["python_repository"])')
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          python -m pip install --upgrade pip build twine
+          aws codeartifact login --tool twine \
+            --domain "$DOMAIN" \
+            --domain-owner "$ACCOUNT" \
+            --repository "$REPO"
+          python -m build "$PACKAGE_DIR"
+          twine upload --repository codeartifact "$PACKAGE_DIR/dist"/*
+
+      - name: Publish to public PyPI
+        if: ${{ vars.PUBLISH_PUBLIC == 'true' || github.event.inputs.publish_public == 'true' }}
+        env:
+          PACKAGE_DIR: ${{ vars.PACKAGE_DIR || '.' }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade twine
+          twine upload "$PACKAGE_DIR/dist"/*
