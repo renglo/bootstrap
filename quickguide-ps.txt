@@ -19,7 +19,7 @@ Set-Location infra-installer
 
 git clone https://github.com/renglo/bootstrap
 git clone https://github.com/renglo/launcher
-git clone https://github.com/renglo/extensions-service
+git clone https://github.com/renglo/bom-helper
 git clone $EXTENSION_REPO
 
 # Workspace root — keep all commands here. $py absolute for synth only.

@@ -10,6 +10,8 @@ Step-by-step guide from scratch. Examples use **bash** (Linux/macOS/WSL).
 
 **Advanced:** extensions and/or ECS/EC2 handlers — see [Advanced](#advanced-extensions-and-ecsec2-handlers).
 
+**Operator CLI:** [`renglo`](../renglo-cli/README.md) wraps this runbook (`renglo system …`, `renglo stack …`, `renglo state …`, `renglo email …`, `renglo admin …`). The bash below remains the manual path. Stack A is never implied by extension install.
+
 ---
 
 
@@ -35,18 +37,18 @@ python3.12 --version
 
 ## 1. Clone repos
 
-Create a workspace folder and clone the three **platform** repos:
+Create a workspace folder and clone the **platform** repos:
 
 ```bash
 mkdir <workspace> && cd <workspace>
 git clone https://github.com/renglo/bootstrap.git bootstrap
 git clone https://github.com/renglo/launcher.git launcher
-git clone https://github.com/renglo/extensions-service.git extensions-service
+git clone https://github.com/renglo/bom-helper.git bom-helper
 ```
 
 You can use any name instead of `infra-installer` for the workspace folder (e.g. `ops/`).
 
-`extensions-service` is required even without an extension: CDK synth imports `compute_stack.py` from it to define the handlers Lambda and OIDC roles. You do **not** clone an extension repo unless you need [Advanced: extensions](#advanced-extensions-and-ecsec2-handlers).
+`bom-helper` is required even without an extension: CDK synth copies `compute_stack.py` from it to define the handlers Lambda and OIDC roles. You do **not** clone an extension repo unless you need [Advanced: extensions](#advanced-extensions-and-ecsec2-handlers).
 
 ---
 
@@ -54,7 +56,7 @@ You can use any name instead of `infra-installer` for the workspace folder (e.g.
 
 ## 2. Virtualenvs
 
-Run from the **workspace root** (the folder that contains `bootstrap/`, `launcher/`, and `extensions-service/`).
+Run from the **workspace root** (the folder that contains `bootstrap/`, `launcher/`, and `bom-helper/`).
 
 **Do not copy** `bootstrap/venv` **from another machine.** A venv is tied to the OS and Python path where it was created.
 
@@ -234,7 +236,9 @@ Platform-wide defaults (`architecture`, backend seed image URI/tag): `launcher/c
 
 ## 4. Generate CloudFormation templates
 
-From the workspace root. You do **not** need to activate the venv — `install.py` re-execs into `bootstrap/venv` automatically:
+From the workspace root. You do **not** need to activate the venv — `install.py` re-execs into `bootstrap/venv` automatically.
+
+**CLI equivalent:** `renglo system synth`.
 
 ```bash
 cd <workspace>
@@ -271,6 +275,8 @@ Stack-a builds and pushes a seed backend image automatically via a CodeBuild cus
 ## 5. Deploy stacks to AWS
 
 Run each step **in order**. Wait for each `cdk deploy` to finish before the next. Stack-a includes a seed image build (CodeBuild) and can take several minutes.
+
+**CLI equivalent:** `renglo system cdk-bootstrap` (once per account/region), then `renglo stack deploy --stack a`, then `renglo stack deploy --stack b`. OIDC is auto-detected on stack-a; you do not choose 5.4A vs 5.4B. To do both stacks and register vars: `renglo stack deploy --stack a,b --write-state` after synth.
 
 ### Step 5.1 — Set environment variables
 
@@ -456,7 +462,9 @@ When stack-b finishes, continue with **[§7 — After bootstrap](#7-after-bootst
 
 ## 6. Bootstrap config in SSM (write-state after stack-b)
 
-CloudFormation stacks do **not** write bootstrap JSON to Parameter Store. After stack-b succeeds, run **write-state** once (idempotent):
+CloudFormation stacks do **not** write bootstrap JSON to Parameter Store. After stack-b succeeds, run **write-state** once (idempotent).
+
+**CLI equivalent:** `renglo state write` (inspect with `renglo state show`).
 
 ```bash
 cd <workspace>
@@ -513,6 +521,8 @@ Continue with **[§7 — After bootstrap](#7-after-bootstrap--make-the-app-usabl
 ## 7. After bootstrap — make the app usable
 
 You now have AWS infrastructure. You do **not** have a working app yet: nobody can log in, and the hosted API is still a placeholder (`seed image ok`). That is expected. The next steps finish email, create the first user, and run the real API on your laptop.
+
+**CLI equivalents:** `renglo email verify-sender`, `renglo admin create EMAIL`, `renglo email allow ADDRESS`, `renglo state local-config`. Collaborator invites (after the API is running): `renglo user invite EMAIL --team TEAM --portfolio PORTFOLIO`.
 
 For a new or test project, follow **7.1 → 7.8** (**Path B**). You do not need GitHub Actions or a cloud deploy.
 
