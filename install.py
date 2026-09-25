@@ -174,7 +174,10 @@ def _package_lib(cdk_dir: Path) -> None:
         helper_scripts / "bom_layout.py",
         helper_scripts / "catalog_slots.py",
         helper_scripts / "peers.py",
+        helper_scripts / "lambda_env.py",
         helper_cdk / "extension_actions_iam.py",
+        helper_cdk / "extension_infra.py",
+        helper_cdk / "s3_vectors_kb_access.py",
     ):
         if src.is_file():
             shutil.copy2(src, lib_dest / src.name)

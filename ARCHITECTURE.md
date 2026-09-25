@@ -4,9 +4,9 @@
  
 This file keeps **example payloads** and design notes that are too long for the README.
 
-**Current path:** Two CDK stacks (`<env>-stack-a`, `<env>-stack-b`) synthesized to `bootstrap/output/<env>/` via `bootstrap/install.py` (`synth`). Stack A can optionally create the account GitHub OIDC provider via the `CreateGitHubOIDC` parameter. Bootstrap config is written to SSM Parameter Store automatically when stack-b deploys.
+**Current path:** Two CDK stacks (`<env>-stack-a`, `<env>-stack-b`) synthesized to `bootstrap/output/<env>/` via `bootstrap/install.py` (`synth`). Stack A can optionally create the account GitHub OIDC provider via the `CreateGitHubOIDC` parameter. Bootstrap config is written to SSM Parameter Store automatically when stack-b deploys. Handler compute and OIDC helpers come from `bom-helper`.
 
-**Legacy path:** `install.py` orchestrator calling `deploy_environment.py` + extensions-service CLIs (see [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)). Each repo can still be used standalone.
+**Legacy path:** `install.py` orchestrator calling `deploy_environment.py` (see [launcher/ENVIRONMENT_README.md](../launcher/ENVIRONMENT_README.md)). Each repo can still be used standalone.
 
 ---
 
@@ -14,7 +14,7 @@ This file keeps **example payloads** and design notes that are too long for the 
 
 ```
 ├── launcher/                  # Core backend (DynamoDB, Cognito, backend Lambda, API GW, CodeDeploy)
-├── extensions-service/        # Handlers Lambda IAM; optional ECS/ECR/S3
+├── bom-helper/                # Handler compute stack + peer CDK helpers
 └── bootstrap/                 # Orchestrator + merged state
     ├── install.py
     ├── uninstall.py
@@ -26,13 +26,13 @@ This file keeps **example payloads** and design notes that are too long for the 
 
 ## What `install.py` does
 
-1. **Launcher** — `launcher/scripts/deploy_environment.py`: GitHub OIDC (production + staging), DynamoDB, Cognito, tenant IAM/S3, backend ECR/Lambda/API Gateway/WebSocket per stage, CodeDeploy, default blueprints.
-2. **Extensions-service** — `provision-infra apply`: handlers Lambda IAM (always); with `--launch-type`: ECS cluster, handlers ECR, S3 results bucket, ECS IAM; with `ec2`: capacity (ASG); optional handlers GitHub OIDC (`--handlers-github-repo`, `--handlers-enable-staging-role`).
-3. **Merge** — writes `bootstrap/state/<extension>/` from `launcher/state` + `extensions-service/state`.
+1. **Synth** — packages launcher CDK plus `bom-helper` compute/OIDC modules into `bootstrap/output/<env>/cdk/`.
+2. **Deploy** — stack A then stack B (`renglo stack deploy` or raw `cdk deploy`).
+3. **State** — `write-state` publishes platform vars to SSM; `write-local-config` writes `output/<env>/local-dev/`.
 
-Partial venv setup: `bash bootstrap/setup-venvs.sh --launcher-only` or `--extensions-only`.
+Partial venv setup: `bash bootstrap/setup-venvs.sh --launcher-only`.
 
-**Uninstall** (`bootstrap/uninstall.py`): extensions teardown → launcher teardown → delete `bootstrap/state/<extension>/`.
+**Uninstall** (`bootstrap/uninstall.py`): optional extension-specific teardown → launcher teardown → delete `bootstrap/state/<extension>/`. Prefer `renglo system destroy` / `renglo stack destroy` for CDK stacks.
 
 ### Merged state (`bootstrap/state/<extension>/`)
 
@@ -43,8 +43,6 @@ Partial venv setup: `bash bootstrap/setup-venvs.sh --launcher-only` or `--extens
 | `deploy_input.json` | **Handlers** stage 2 + GitHub Environment |
 | `env_config.py` | App config (launcher + ECS; ECS keys omitted when lambda-only) |
 
-Copy before handlers stage 2: `bootstrap/state/<extension>/deploy_input.json` → `extensions-service/state/<extension>/deploy_input.json` (or `dev/extensions-service/state/<extension>/` in the product repo).
-
 ### State directories
 
 ```
@@ -53,14 +51,6 @@ launcher/state/<extension>/
     production.json
     staging.json
     env_config.py
-
-extensions-service/state/<extension>/
-    provision_manifest.json
-    handlers_github_oidc.json
-    runtime_profile.json
-    deploy_input.json
-    release_manifest.json
-    lambda_env_export.json
 
 bootstrap/state/<extension>/
     platform_vars.production.json
@@ -72,13 +62,6 @@ bootstrap/state/<extension>/
 State trees are typically gitignored.
 
 ### Standalone teardown
-
-**extensions-service only:**
-
-```bash
-python extensions-service/run.py <extension> provision-infra teardown \
-  --profile <aws-profile> --yes [--keep-logs]
-```
 
 **launcher only:**
 
@@ -144,9 +127,7 @@ Handlers **stage 2** deploy and GitHub Environment (same envelope as `platform_v
 }
 ```
 
-Deploy merges `VARS` + `SECRETS` into Lambda/ECS runtime except `RUNTIME_ENV_EXCLUDE` (e.g. `AWS_GITHUB_OIDC_ROLE_ARN` for CI only). `VARS` include both `AWS_REGION` and `AWS_DEFAULT_REGION` (same value); ECS task env keeps both; Lambda deploy omits them from `Environment.Variables` (AWS reserved). Lambda create/update metadata is fixed in `extensions-service/deploy_input.py` (including `Description`: `Reglo Deployment`); `FunctionName` comes from `VARS.LAMBDA_HANDLERS_FUNCTION_NAME`. Provision scripts tag IAM/S3/ECR/ECS/CloudWatch resources with the same label where AWS supports it.
-
-Schema: `extensions-service/state/schemas/deploy_input.schema.json`
+Deploy merges `VARS` + `SECRETS` into Lambda/ECS runtime except `RUNTIME_ENV_EXCLUDE` (e.g. `AWS_GITHUB_OIDC_ROLE_ARN` for CI only). `VARS` include both `AWS_REGION` and `AWS_DEFAULT_REGION` (same value); ECS task env keeps both; Lambda deploy omits them from `Environment.Variables` (AWS reserved). `FunctionName` comes from `VARS.LAMBDA_HANDLERS_FUNCTION_NAME`. Provision scripts tag IAM/S3/ECR/ECS/CloudWatch resources with the same label where AWS supports it.
 
 ---
 

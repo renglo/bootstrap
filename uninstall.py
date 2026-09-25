@@ -1,22 +1,19 @@
 """Platform uninstaller orchestrator.
 
-Tears down both extensions-service ECS infra and launcher backend/core infra
-by delegating to each repo's own teardown command (same flags unified here).
+Tears down launcher backend/core infra (and optional extension-specific scripts).
 
 Usage:
     python bootstrap/uninstall.py <extension> \\
         --profile acd-arbitium-tt-dev \\
         [--yes] \\
         [--extension-specific <folder>] \\
-        [--skip-extensions] \\
         [--skip-launcher] \\
         [--skip-tables] \\
         [--skip-cognito] \\
         [--keep-logs] \\
 Teardown order:
   0. extension-specific: <folder>/installer/infra/teardown_extension.sh  (if --extension-specific)
-  1. extensions-service: python run.py <ext> provision-infra teardown --profile ... --yes [--keep-logs]
-  2. launcher:           python scripts/teardown_environment.py <ext> --aws-profile ... --yes [--skip-*] [--keep-logs]
+  1. launcher:           python scripts/teardown_environment.py <ext> --aws-profile ... --yes [--skip-*] [--keep-logs]
 """
 
 from __future__ import annotations
@@ -54,18 +51,6 @@ def _launcher_python() -> str:
     return _resolve_python("launcher", _WORKSPACE_ROOT / "launcher" / "launch-venv")
 
 
-def _extensions_python() -> str:
-    venv_dir = _WORKSPACE_ROOT / "extensions-service" / "venv"
-    candidates = [
-        venv_dir / "bin" / "python",
-        venv_dir / "Scripts" / "python.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    return sys.executable
-
-
 def _run_subprocess(cmd: list[str], cwd: Path, description: str) -> int:
     """Run a subprocess command. Returns the exit code (does not exit on failure)."""
     import subprocess
@@ -86,7 +71,7 @@ def _run_extension_teardown(
 ) -> int:
     """Run teardown_extension.sh from <ext_folder>/installer/infra/ if present.
 
-    Must run BEFORE extensions-service and launcher teardowns so that policy
+    Must run BEFORE launcher teardown so that policy
     detaches happen while the roles still exist.
     Returns the exit code (0 = success; non-zero = failure).
     """
@@ -109,27 +94,6 @@ class UnifiedTeardownOptions:
     keep_logs: bool = False
     skip_tables: bool = False
     skip_cognito: bool = False
-
-
-def _run_extensions_teardown(extension: str, profile: str, opts: UnifiedTeardownOptions) -> int:
-    ext_service = _WORKSPACE_ROOT / "extensions-service"
-    cmd: list[str] = [
-        _extensions_python(),
-        "run.py",
-        extension,
-        "provision-infra",
-        "teardown",
-        "--profile",
-        profile,
-        "--yes",
-    ]
-    if opts.keep_logs:
-        cmd.append("--keep-logs")
-    return _run_subprocess(
-        cmd,
-        cwd=ext_service,
-        description=f"Extensions-service: teardown '{extension}'",
-    )
 
 
 def _run_launcher_teardown(
@@ -177,7 +141,7 @@ def _cleanup_platform_state(extension: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Platform uninstaller: tears down extensions-service + launcher infra",
+        description="Platform uninstaller: tears down launcher infra",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -187,7 +151,7 @@ def main() -> None:
     parser.add_argument(
         "--profile",
         required=True,
-        help="AWS named profile (passed as --profile to extensions-service, --aws-profile to launcher)",
+        help="AWS named profile (passed as --aws-profile to launcher)",
     )
     parser.add_argument(
         "--aws-region",
@@ -198,11 +162,6 @@ def main() -> None:
         "--yes",
         action="store_true",
         help="Confirm teardown without interactive prompt",
-    )
-    parser.add_argument(
-        "--skip-extensions",
-        action="store_true",
-        help="Skip extensions-service teardown",
     )
     parser.add_argument(
         "--skip-launcher",
@@ -222,7 +181,7 @@ def main() -> None:
     parser.add_argument(
         "--keep-logs",
         action="store_true",
-        help="Preserve CloudWatch log groups in both extensions-service and launcher teardowns",
+        help="Preserve CloudWatch log groups in launcher teardown",
     )
     parser.add_argument(
         "--extension-specific",
@@ -230,7 +189,7 @@ def main() -> None:
         metavar="FOLDER",
         help=(
             "Extension repo folder under workspace (path name only). "
-            "Runs <folder>/installer/infra/teardown_extension.sh before extensions-service and launcher teardown."
+            "Runs <folder>/installer/infra/teardown_extension.sh before launcher teardown."
         ),
     )
     args = parser.parse_args()
@@ -283,20 +242,7 @@ def main() -> None:
             errors.append(f"extension-specific teardown exited with code {rc}")
             print(f"\nWarning: extension teardown failed (code {rc}). Continuing...")
 
-    # Step 1: extensions-service teardown
-    if not args.skip_extensions:
-        rc = _run_extensions_teardown(
-            extension=args.extension,
-            profile=args.profile,
-            opts=opts,
-        )
-        if rc != 0:
-            errors.append(f"extensions-service teardown exited with code {rc}")
-            print(f"\nWarning: extensions-service teardown failed (code {rc}). Continuing...")
-    else:
-        print("\n[extensions-service teardown] SKIPPED (--skip-extensions)")
-
-    # Step 2: launcher teardown
+    # Step 1: launcher teardown
     if not args.skip_launcher:
         rc = _run_launcher_teardown(
             extension=args.extension,
